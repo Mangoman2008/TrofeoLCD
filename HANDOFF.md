@@ -21,18 +21,18 @@ $ param get const.product.model      → QXS-W10     (deviceType=tablet, API 26)
 
 | 部分 | 内容 | 规模 |
 |---|---|---|
-| 鸿蒙应用 | LY 协议驱动 + 1920×480 仪表盘 + USB 推帧 + 远程预览/诊断 | 17 个 .ets / 3632 行 |
+| 鸿蒙应用 | LY 协议驱动 + 1920×480 仪表盘（19 主题）+ USB 推帧 + 远程预览/诊断 | 54 个 .ets / 2.6 万行 |
 | 数据桥 | DSH 会话 → UDP 遥测（尾部 zstd 解压、系统指标、可选天气/歌词） | `bridge/dsh-bridge.mjs` |
-| 工具链 | 构建 / 签名（3 种）/ 安装 / 自检 / 布局审计 / 诊断 / 看板 | 21 个脚本 / 2598 行 |
+| 工具链 | 构建 / 签名（3 种）/ 安装 / 自检 / 布局审计 / 诊断 / 看板 | 56 个脚本 / 8446 行 |
 
 ## 三、已被验证的（可复现）
 
 ```bash
-bash tools/run_selftest.sh     # 协议/校准/归一化/调度    → 38/38 通过
+bash tools/run_selftest.sh     # 协议/校准/归一化/调度    → 59/59 通过
 bash tools/run_hw_test.sh      # USB 层（真实源码+仿真设备）→ 20/20 通过
-python3 tools/layout_check.py  # 布局审计                → 0 问题
+python3 tools/layout_check.py  # 布局审计（19 主题全覆盖）  → 0 问题
 python3 tools/layout_check.py --stress   # 6 类极端/真实输入 → 全部干净
-bash tools/cli_build.sh        # 命令行构建（副本内，不污染工程）→ BUILD SUCCESSFUL
+devecocli build                # 构建（cli_build.sh 在本机受 hvigorw shebang 限制不可用）
 ```
 
 - **协议已与参考实现逐字核对**（trcc 的 `ly_lcd.py` / `core/protocol.py`）：
@@ -55,6 +55,7 @@ bash tools/cli_build.sh        # 命令行构建（副本内，不污染工程�
 
 ```bash
 bash tools/cli_build.sh                          # 自动出签名包 + verify-app 校验
+                                                 # （本机不可用时改用 devecocli build）
 bash tools/install_local.sh --port <无线调试端口>  # 安装 → 启动（脚本带端口扫描）
 bash tools/fetch_diag.sh probe                   # 取回完整证据（无需复制日志）
 ```
@@ -65,7 +66,7 @@ bash tools/fetch_diag.sh probe                   # 取回完整证据（无需�
 
 | 界面行 / 接口 | 期望 |
 |---|---|
-| `协议自检` | `自检 38/38 通过` |
+| `协议自检` | `自检 59/59 通过` |
 | `USB 屏幕` | `Trofeo Vision ... (416:5408)` |
 | `设备信息` | `PM=65 SUB=5 FBL=192 1920x480 rot=180°` |
 | `端点` | `iface0/class255 OUT=0x9 IN=0x81` |
@@ -93,7 +94,7 @@ bash tools/fetch_diag.sh probe                   # 取回完整证据（无需�
 ```bash
 cd ~/WorkBuddy/TrofeoLCD
 bash tools/preflight.sh          # 一眼看清：设备 / hdc / 产物 / 缓存来源 / 签名绑定
-bash tools/run_selftest.sh       # 确认代码仍健康（38/38）
+bash tools/run_selftest.sh       # 确认代码仍健康（59/59）
 bash tools/run_hw_test.sh        # 确认 USB 层仍健康（20/20）
 ```
 
@@ -677,3 +678,26 @@ HAP 构建走的是另一条路：`/data/service/hnp/hmos-clt.org/hmos-clt_1.0.0
 
 - `docs/theme0-preview.png`（仪表盘，亮像素 28884）
 - `docs/theme1-preview.png`（诊断终端，亮像素 3393：标题 1363 / 事件流 708 / 指标栏 812 / 体检条 510）
+
+## 2026-10-31 增量审计轮（A/B/C 三组，全部落地）
+
+详见 `docs/代码审查报告-2026-10-31.md`。要点：
+
+- **提交链**（可整轮回滚 `git reset --hard e766fba`）：
+  `c3e0de6`（A：生命周期护栏 + 真累计语义）→
+  `735a8ef`（B：天气/mario/Snake/运行时修复 + jev-hud 加固）→
+  `dfcf567`（C：LyProtocol 缓冲复用 + Chrome 渐变缓存 + 审计工具覆盖主题 16-18）。
+- **抓到并修掉的真 bug**：主题轮播 `%16` 轮不到 16/17/18（THEME_COUNT=19 单一真源）、
+  History 断点归一成贴地假数据、FocusTimer 假累计、24h 曲线 UTC 锚偏 8h、
+  mario 选人行咬合 5px、ThemeWeather `FS=1.85` 前提错误（时钟顶被裁 62px/三连咬合，改 1.0）、
+  ThemeAnime neonTitle 先量后切字体、NanoMuse 头部日期压时钟 43px、bigTile 标签压值 4.6px。
+- **工具链升级**：19 主题布局审计全覆盖（此前 16-18 是仪表盘假结果）；
+  shim 补 `clip()`/有效 alpha/`ellipse()`；时钟钉死可确定性复现；
+  selftest/layout_check 共享同一转译清单（`tools/ets_files.txt`）。
+- **验证数字**：selftest 59/59、hw_test 20/20、layout 19/19 主题 0 问题、
+  `devecocli build` 成功、`node --check bridge/jev-hud.mjs` 通过。
+- **C# 移交清单**（未动代码，待 Windows 虚拟机编译验证）：
+  LcdRunner `_dev` 无互斥（:72/:127-131/:353-361）、诊断字段无 volatile/Interlocked（:99-101）、
+  MiniHttp `_requests++` 非原子（:171）。
+- **本机限制备忘**：`tools/cli_build.sh` 因 hvigorw shebang（`bad interpreter: Operation not permitted`）
+  在本机不可用，构建验证一律走 `devecocli build`。
