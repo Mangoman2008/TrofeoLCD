@@ -1,0 +1,10 @@
+{
+  "app": {
+    "bundleName": "com.dsh.trofeolcd",
+    "vendor": "dsh",
+    "versionCode": 1000001,
+    "versionName": "1.0.1",
+    "icon": "$media:layered_image",
+    "label": "$string:app_name"
+  }
+}

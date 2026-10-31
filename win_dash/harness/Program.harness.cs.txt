@@ -1,0 +1,685 @@
+/**
+ * Program.cs（win_dash 专用自测外壳，不是交付物）
+ *
+ * 造一份内容齐全的样例遥测（中文项目名/待办/token/系统/天气/歌词），
+ * 用 Dashboard.RenderHorizontal / RenderVertical 渲染成 JPEG，并做像素级健全性检查：
+ *   - JPEG 尺寸必须正好 1920×462 / 462×1920（取自 Theme.L，别写死）
+ *   - 按面板切段统计「非背景色」像素数，确认每块面板都真的画了东西
+ *
+ * 用法：
+ *   dshlcd.exe --render   C:\dshlcd_dash\out\h.jpg      横屏（带 VM 画面）
+ *   dshlcd.exe --render-v C:\dshlcd_dash\out\v.jpg      竖屏（带 VM 画面）
+ *   加 --novm 则不传 VM 画面（走「等待 VM 画面…」占位分支）
+ *   dshlcd.exe --all                                    一次画 4 张到 exe 同目录
+ */
+using System;
+using System.Collections.Generic;
+using System.Drawing;
+using System.Drawing.Drawing2D;
+using System.Drawing.Imaging;
+using System.Drawing.Text;
+using System.Globalization;
+using System.IO;
+using System.Runtime.InteropServices;
+using System.Text;
+
+namespace DshLcd
+{
+    public static class Program
+    {
+        private static readonly CultureInfo Inv = CultureInfo.InvariantCulture;
+        private static readonly string[] Week = new string[] { "日", "一", "二", "三", "四", "五", "六" };
+
+        public static int Main(string[] args)
+        {
+            string logPath = ArgValue(args, "--log");
+            if (string.IsNullOrEmpty(logPath)) logPath = Path.Combine(ExeDir(), "dshlcd.log");
+            Log.Open(logPath);
+
+            Log.W("== dash render harness ==");
+            Log.W("exe  : {0}", System.Reflection.Assembly.GetExecutingAssembly().Location);
+            Log.W("字体 : {0} / {1}", "Microsoft YaHei", "Consolas");
+
+            try
+            {
+                if (Has(args, "--all"))
+                {
+                    string dir = ExeDir();
+                    ReportFonts();
+                    int rc = 0;
+                    rc |= Render(Path.Combine(dir, "dash_h.jpg"), false, false, false);
+                    rc |= Render(Path.Combine(dir, "dash_v.jpg"), true, false, false);
+                    rc |= Render(Path.Combine(dir, "dash_h_novm.jpg"), false, true, false);
+                    rc |= Render(Path.Combine(dir, "dash_v_novm.jpg"), true, true, false);
+                    rc |= Render(Path.Combine(dir, "dash_h_empty.jpg"), false, true, true);
+                    rc |= Render(Path.Combine(dir, "dash_v_empty.jpg"), true, true, true);
+                    Log.W("== dash done rc={0} ==", rc);
+                    return rc;
+                }
+
+                if (Has(args, "--fonts"))
+                {
+                    ReportFonts();
+                    Log.W("== dash done rc=0 ==");
+                    return 0;
+                }
+
+                string lv = ArgValue(args, "--loop");
+                if (lv != null)
+                {
+                    return LoopFrames(int.Parse(lv, Inv));
+                }
+
+                string hv = ArgValue(args, "--render");
+                if (hv != null)
+                {
+                    return Render(hv, false, Has(args, "--novm"), Has(args, "--empty"));
+                }
+                string vv = ArgValue(args, "--render-v");
+                if (vv != null)
+                {
+                    return Render(vv, true, Has(args, "--novm"), Has(args, "--empty"));
+                }
+
+                Log.W("用法：--render <jpg> | --render-v <jpg> | --all  （可加 --novm）");
+                return 2;
+            }
+            catch (Exception ex)
+            {
+                Log.Err("异常：{0}", ex.ToString());
+                return 3;
+            }
+        }
+
+        // ==================================================================
+
+        private static int Render(string outPath, bool vertical, bool noVm, bool empty)
+        {
+            // 尺寸一律取自 Theme.L（曾经在这里写死 480，Theme 换成 462 后
+            // 渲染出来的对照图还是 480 高 —— 审计等于在验旧版式）
+            int W = vertical ? (int)L.Height : (int)L.Width;
+            int H = vertical ? (int)L.Width : (int)L.Height;
+
+            Log.W("---- 渲染 {0}：{1}×{2}（{3}{4}）----", outPath, W.ToString(Inv), H.ToString(Inv),
+                vertical ? "竖向" : "横向", empty ? "，空状态（首次启动，没有任何遥测）" : "");
+
+            State st = empty ? EmptyState() : SampleState();
+            DateTime now = new DateTime(2026, 10, 12, 21, 47, 36, DateTimeKind.Local);
+
+            Bitmap vm = null;
+            string vmErr = "";
+            double vmAgeMs = -1;
+            if (!noVm)
+            {
+                vm = MakeFakeVmFrame();
+                vmAgeMs = 340;
+                Log.W("VM 画面：{0}×{1}（合成测试帧），age={2}ms",
+                    vm.Width.ToString(Inv), vm.Height.ToString(Inv), Fixed(vmAgeMs, 0));
+            }
+            else
+            {
+                vmErr = "livepad 未响应（127.0.0.1:8787）";
+                Log.W("VM 画面：null（vmErr='{0}'）", vmErr);
+            }
+
+            int rc = 0;
+            using (Bitmap bmp = new Bitmap(W, H, PixelFormat.Format32bppArgb))
+            {
+                using (Graphics g = Graphics.FromImage(bmp))
+                {
+                    if (vertical)
+                    {
+                        Dashboard.RenderVertical(g, st, vm, vmAgeMs, vmErr, now);
+                    }
+                    else
+                    {
+                        Dashboard.RenderHorizontal(g, st, vm, vmAgeMs, vmErr, now);
+                    }
+                }
+
+                long bytes = SaveJpeg(bmp, outPath, 90L);
+                Log.W("JPEG 尺寸：{0}×{1}（要求 {2}×{3}）{4}",
+                    bmp.Width.ToString(Inv), bmp.Height.ToString(Inv),
+                    W.ToString(Inv), H.ToString(Inv),
+                    (bmp.Width == W && bmp.Height == H) ? "  OK" : "  **尺寸不对**");
+                if (bmp.Width != W || bmp.Height != H)
+                {
+                    rc |= 1;
+                }
+                Log.W("JPEG 字节数：{0} B（{1}）", bytes.ToString(Inv), outPath);
+                if (bytes <= 0)
+                {
+                    rc |= 1;
+                }
+
+                rc |= Inspect(outPath, vertical, noVm);
+            }
+
+            if (vm != null)
+            {
+                vm.Dispose();
+            }
+            Log.W("字体缓存条目：{0}", F.CacheCount().ToString(Inv));
+            Log.W("-- 渲染结束 {0} --", rc == 0 ? "OK" : "FAIL");
+            Log.W("== dash marker ==");
+            return rc;
+        }
+
+        /// <summary>读回 JPEG 再统计（统计的是真正落盘的像素，不是内存里的）</summary>
+        private static int Inspect(string jpgPath, bool vertical, bool noVm)
+        {
+            int rc = 0;
+            using (Bitmap loaded = new Bitmap(jpgPath))
+            {
+                Log.W("落盘回读：{0}×{1}，PixelFormat={2}",
+                    loaded.Width.ToString(Inv), loaded.Height.ToString(Inv), loaded.PixelFormat.ToString());
+
+                int W = loaded.Width;
+                int H = loaded.Height;
+                using (Bitmap v = new Bitmap(W, H, PixelFormat.Format32bppArgb))
+                {
+                    using (Graphics vg = Graphics.FromImage(v))
+                    {
+                        vg.DrawImageUnscaled(loaded, 0, 0);
+                    }
+                    BitmapData bd = v.LockBits(new Rectangle(0, 0, W, H), ImageLockMode.ReadOnly,
+                        PixelFormat.Format32bppArgb);
+                    int stride = bd.Stride;
+                    byte[] buf = new byte[stride * H];
+                    Marshal.Copy(bd.Scan0, buf, 0, buf.Length);
+                    v.UnlockBits(bd);
+
+                    // 背景基准：逐行线性插值（和 Background() 的渐变一致）
+                    Color bgTop = C.BgTop;
+                    Color bgBot = C.BgBot;
+
+                    Log.W("背景探针：顶行(5,4)=#{0:X2}{1:X2}{2:X2}  底行(5,{3})=#{4:X2}{5:X2}{6:X2}",
+                        buf[4 * stride + 5 * 4 + 2], buf[4 * stride + 5 * 4 + 1], buf[4 * stride + 5 * 4 + 0],
+                        H - 5, buf[(H - 5) * stride + 5 * 4 + 2], buf[(H - 5) * stride + 5 * 4 + 1],
+                        buf[(H - 5) * stride + 5 * 4 + 0]);
+                    Log.W("（令牌 bgTop=#{0:X2}{1:X2}{2:X2}  bgBot=#{3:X2}{4:X2}{5:X2}）",
+                        bgTop.R, bgTop.G, bgTop.B, bgBot.R, bgBot.G, bgBot.B);
+
+                    List<Region> regions = Regions(vertical);
+                    Log.W("分段统计（d25=与背景差的绝对值和>25，含面板底色；d60=文字/强调色；unq=颜色种类）");
+                    Log.W("{0,-22} {1,10} {2,10} {3,8} {4,10}", "区域", "像素数", "d25", "d60", "unq");
+
+                    for (int i = 0; i < regions.Count; i++)
+                    {
+                        Region r = regions[i];
+                        int x0 = (int)Math.Max(0, Math.Round(r.X));
+                        int y0 = (int)Math.Max(0, Math.Round(r.Y));
+                        int x1 = (int)Math.Min(W, Math.Round(r.X + r.W));
+                        int y1 = (int)Math.Min(H, Math.Round(r.Y + r.H));
+                        long total = 0, d25 = 0, d60 = 0;
+                        HashSet<int> uniq = new HashSet<int>();
+                        for (int y = y0; y < y1; y++)
+                        {
+                            int bgR = (int)Math.Round(bgTop.R + (bgBot.R - bgTop.R) * (double)y / (H - 1));
+                            int bgG = (int)Math.Round(bgTop.G + (bgBot.G - bgTop.G) * (double)y / (H - 1));
+                            int bgB = (int)Math.Round(bgTop.B + (bgBot.B - bgTop.B) * (double)y / (H - 1));
+                            int row = y * stride;
+                            for (int x = x0; x < x1; x++)
+                            {
+                                int o = row + x * 4;
+                                int b = buf[o];
+                                int gg = buf[o + 1];
+                                int rr = buf[o + 2];
+                                int d = Math.Abs(rr - bgR) + Math.Abs(gg - bgG) + Math.Abs(b - bgB);
+                                total++;
+                                if (d > 25) d25++;
+                                if (d > 60) d60++;
+                                if (uniq.Count < 4000) uniq.Add((rr << 16) | (gg << 8) | b);
+                            }
+                        }
+                        Log.W("{0,-22} {1,10} {2,10} {3,8} {4,10}", r.Name,
+                            total.ToString(Inv), d25.ToString(Inv), d60.ToString(Inv),
+                            uniq.Count.ToString(Inv));
+
+                        if (d60 < 200)
+                        {
+                            Log.W("   ** {0} 几乎没画东西（d60={1}）**", r.Name, d60.ToString(Inv));
+                            rc |= 2;
+                        }
+                    }
+
+                    if (noVm)
+                    {
+                        // 无 VM 画面时必须走占位分支：面板中部要有 "等待 VM 画面…" 的文字像素
+                        Region vr = Find(regions, "VM 画面");
+                        int x0 = (int)vr.X + 40, y0 = (int)(vr.Y + vr.H / 2) - 40;
+                        int x1 = (int)(vr.X + vr.W) - 40, y1 = (int)(vr.Y + vr.H / 2) + 40;
+                        long txt = 0;
+                        for (int y = y0; y < y1; y++)
+                        {
+                            int row = y * stride;
+                            for (int x = x0; x < x1; x++)
+                            {
+                                int o = row + x * 4;
+                                int d = Math.Abs(buf[o + 2] - bgTop.R) + Math.Abs(buf[o + 1] - bgTop.G)
+                                    + Math.Abs(buf[o] - bgTop.B);
+                                if (d > 25) txt++;
+                            }
+                        }
+                        Log.W("占位分支检查：VM 区中部非背景像素 {0}（>0 表示「等待 VM 画面…」文字已画）",
+                            txt.ToString(Inv));
+                        if (txt <= 0) rc |= 4;
+                    }
+                }
+            }
+            return rc;
+        }
+
+        private class Region
+        {
+            public string Name;
+            public double X, Y, W, H;
+            public Region(string name, double x, double y, double w, double h)
+            {
+                Name = name; X = x; Y = y; W = w; H = h;
+            }
+        }
+
+        private static Region Find(List<Region> rs, string name)
+        {
+            for (int i = 0; i < rs.Count; i++)
+            {
+                if (rs[i].Name == name) return rs[i];
+            }
+            return rs[0];
+        }
+
+        private static List<Region> Regions(bool vertical)
+        {
+            List<Region> rs = new List<Region>();
+            if (vertical)
+            {
+                double x = V.Margin;
+                double w = V.InnerW();
+                rs.Add(new Region("顶部时钟", x, V.HdrY, w, V.HdrH));
+                rs.Add(new Region("VM 画面", x, V.VmY, w, V.VmH));
+                rs.Add(new Region("系统 SYSTEM", x, V.SysY, w, V.SysH));
+                rs.Add(new Region("DSH 会话", x, V.AgY, w, V.AgH));
+                rs.Add(new Region("用量 USAGE", x, V.UsY, w, V.UsH));
+            }
+            else
+            {
+                rs.Add(new Region("系统 SYSTEM", L.PanelX(0), L.PanelY, L.PanelWidth, L.PanelHeight));
+                rs.Add(new Region("DSH 会话(1-3)", L.PanelX(1), L.PanelY,
+                    L.PanelWidth * 3 + L.Gap * 2, L.PanelHeight));
+                rs.Add(new Region("用量 USAGE", L.PanelX(4), L.PanelY, L.PanelWidth, L.PanelHeight));
+                rs.Add(new Region("VM 画面", L.VmX, L.VmY, L.VmW, L.VmH));
+            }
+            return rs;
+        }
+
+        // ==================================================================
+
+        /// <summary>首次启动的状态：一个包都没收到（Data 全 null，LastRxTs=0，Packets=0）</summary>
+        private static State EmptyState()
+        {
+            return new State();
+        }
+
+        /// <summary>
+        /// 字体体检：确认 "Microsoft YaHei" / "Consolas" 真的解析到了（没落到 GDI+ 兜底族），
+        /// 并且中文不是豆腐块 —— 逐字渲染「任务进度」，比较四个字的墨迹指纹，
+        /// 豆腐块会让四个字的指纹完全相同。
+        /// </summary>
+        private static void ReportFonts()
+        {
+            Font sans = F.SansFont(20, false);
+            Font mono = F.MonoFont(20, false);
+            Log.W("字体解析：sans 请求 Microsoft YaHei → 实际 {0}；mono 请求 Consolas → 实际 {1}",
+                sans.FontFamily.Name, mono.FontFamily.Name);
+            Log.W("实测宽度（px）：雅黑20 的「任务进度」={0}，「AAAA」={1}；Consolas20 的「0123」={2}",
+                Fixed(StrW("任务进度", sans), 1), Fixed(StrW("AAAA", sans), 1),
+                Fixed(StrW("0123", mono), 1));
+
+            using (InstalledFontCollection col = new InstalledFontCollection())
+            {
+                List<string> hits = new List<string>();
+                for (int i = 0; i < col.Families.Length; i++)
+                {
+                    string n = col.Families[i].Name;
+                    if (n.IndexOf("YaHei", StringComparison.OrdinalIgnoreCase) >= 0
+                        || n.IndexOf("Consolas", StringComparison.OrdinalIgnoreCase) >= 0
+                        || n.IndexOf("SimSun", StringComparison.OrdinalIgnoreCase) >= 0
+                        || n.IndexOf("JhengHei", StringComparison.OrdinalIgnoreCase) >= 0
+                        || n.IndexOf("SimHei", StringComparison.OrdinalIgnoreCase) >= 0)
+                    {
+                        hits.Add(n);
+                    }
+                }
+                Log.W("系统里的候选字体族（{0} 个）：{1}", hits.Count.ToString(Inv), string.Join(" / ", hits.ToArray()));
+            }
+
+            Font big = F.SansFont(32, false);
+            string s = "任务进度";
+            List<string> fps = new List<string>();
+            for (int i = 0; i < s.Length; i++)
+            {
+                string one = s.Substring(i, 1);
+                string fp;
+                int ink;
+                Fingerprint(one, big, out fp, out ink);
+                fps.Add(fp);
+                Log.W("  汉字「{0}」：32px 下墨迹块 {1}，指纹 {2}", one, ink.ToString(Inv), fp);
+            }
+            bool distinct = true;
+            for (int i = 1; i < fps.Count; i++)
+            {
+                if (fps[i] == fps[0]) distinct = false;
+            }
+            Log.W("四个汉字指纹互不相同：{0}（若为 False 说明是豆腐块/缺字形）", distinct);
+        }
+
+        private static double StrW(string text, Font f)
+        {
+            using (Bitmap b = new Bitmap(8, 8, PixelFormat.Format32bppArgb))
+            using (Graphics g = Graphics.FromImage(b))
+            {
+                return g.MeasureString(text, f).Width;
+            }
+        }
+
+        private static void Fingerprint(string text, Font f, out string fp, out int ink)
+        {
+            using (Bitmap b = new Bitmap(48, 48, PixelFormat.Format32bppArgb))
+            {
+                using (Graphics g = Graphics.FromImage(b))
+                {
+                    g.Clear(Color.Black);
+                    g.TextRenderingHint = TextRenderingHint.AntiAliasGridFit;
+                    using (SolidBrush w = new SolidBrush(Color.White))
+                    {
+                        g.DrawString(text, f, w, new PointF(2f, 0f));
+                    }
+                }
+                StringBuilder sb = new StringBuilder();
+                ink = 0;
+                for (int by = 0; by < 48; by += 4)
+                {
+                    for (int bx = 0; bx < 48; bx += 4)
+                    {
+                        bool hit = false;
+                        for (int y = by; y < by + 4 && !hit; y++)
+                        {
+                            for (int x = bx; x < bx + 4; x++)
+                            {
+                                if (b.GetPixel(x, y).R > 128)
+                                {
+                                    hit = true;
+                                    break;
+                                }
+                            }
+                        }
+                        sb.Append(hit ? '1' : '0');
+                        if (hit) ink++;
+                    }
+                }
+                uint h = 2166136261u;
+                string raw = sb.ToString();
+                for (int i = 0; i < raw.Length; i++)
+                {
+                    h = h ^ raw[i];
+                    h = h * 16777619u;
+                }
+                fp = h.ToString("X8", Inv);
+            }
+        }
+
+        /// <summary>
+        /// 连续帧循环生存性测试（这是主程序真正的热路径）：
+        /// 横竖交替渲染 N 帧，每 20 帧报一次 GDI/USER 对象数，每 50 帧真编码一次 JPEG。
+        /// GDI 对象数必须稳定 —— 每帧 new 一堆 Brush/Pen/Path 不释放就会一路涨到上限。
+        /// </summary>
+        private static int LoopFrames(int n)
+        {
+            Log.W("循环渲染 {0} 帧（横竖交替；每 50 帧编码一次 JPEG）…", n.ToString(Inv));
+            State st = SampleState();
+            DateTime now = new DateTime(2026, 10, 12, 21, 47, 36, DateTimeKind.Local);
+            uint gdi0 = GdiObjects();
+            uint usr0 = UserObjects();
+            Log.W("起始：GDI 对象 {0}，USER 对象 {1}，字体缓存 {2}",
+                gdi0.ToString(Inv), usr0.ToString(Inv), F.CacheCount().ToString(Inv));
+            uint gdiMax = gdi0;
+            long t0 = Environment.TickCount;
+            using (Bitmap fk = MakeFakeVmFrame())
+            using (Bitmap hb = new Bitmap((int)L.Width, (int)L.Height, PixelFormat.Format32bppArgb))
+            using (Bitmap vb = new Bitmap((int)L.Height, (int)L.Width, PixelFormat.Format32bppArgb))
+            using (Graphics hg = Graphics.FromImage(hb))
+            using (Graphics vg = Graphics.FromImage(vb))
+            {
+                for (int i = 0; i < n; i++)
+                {
+                    bool vert = (i % 2) == 1;
+                    Bitmap vm = (i % 25 == 0) ? fk : null;
+                    double age = vm == null ? -1 : 320;
+                    DateTime t = now.AddMilliseconds(i * 40);
+                    if (vert) Dashboard.RenderVertical(vg, st, vm, age, "", t);
+                    else Dashboard.RenderHorizontal(hg, st, vm, age, "", t);
+
+                    if (i % 50 == 49)
+                    {
+                        long bytes = SaveJpeg(hb, Path.Combine(ExeDir(), "loop_tmp.jpg"), 85L);
+                        Log.W("  第 {0,4} 帧后编码 JPEG {1} B", i + 1, bytes.ToString(Inv));
+                    }
+                    uint g = GdiObjects();
+                    if (g > gdiMax) gdiMax = g;
+                    if (i == 0 || (i + 1) % 20 == 0)
+                    {
+                        Log.W("  第 {0,4} 帧：GDI {1}，USER {2}，累计 {3} ms",
+                            i + 1, g.ToString(Inv), UserObjects().ToString(Inv),
+                            (Environment.TickCount - t0).ToString(Inv));
+                    }
+                }
+            }
+            long ms = Environment.TickCount - t0;
+            uint gdi1 = GdiObjects();
+            Log.W("结束：GDI 对象 {0}（峰值 {1}，起始 {2}），USER 对象 {3}，字体缓存 {4}",
+                gdi1.ToString(Inv), gdiMax.ToString(Inv), gdi0.ToString(Inv),
+                UserObjects().ToString(Inv), F.CacheCount().ToString(Inv));
+            Log.W("{0} 帧共 {1} ms（{2} ms/帧，横竖交替）",
+                n.ToString(Inv), ms.ToString(Inv), Fixed(ms / (double)n, 1));
+            int rc = 0;
+            if (gdiMax > gdi0 + 40)
+            {
+                Log.Err("GDI 对象涨了 {0} 个（起始 {1} → 峰值 {2}）—— 有对象没释放！",
+                    (gdiMax - gdi0).ToString(Inv), gdi0.ToString(Inv), gdiMax.ToString(Inv));
+                rc = 8;
+            }
+            Log.W("GDI 稳定性：{0}", rc == 0 ? "OK（无泄漏迹象）" : "FAIL");
+            Log.W("== dash done rc={0} ==", rc);
+            return rc;
+        }
+
+        [DllImport("user32.dll")]
+        private static extern uint GetGuiResources(IntPtr hProcess, uint uiFlags);
+
+        [DllImport("kernel32.dll")]
+        private static extern IntPtr GetCurrentProcess();
+
+        private static uint GdiObjects()
+        {
+            try { return GetGuiResources(GetCurrentProcess(), 0); }
+            catch (Exception) { return 0; }
+        }
+
+        private static uint UserObjects()
+        {
+            try { return GetGuiResources(GetCurrentProcess(), 1); }
+            catch (Exception) { return 0; }
+        }
+
+        private static State SampleState()
+        {
+            State st = new State();
+
+            AgentInfo ag = new AgentInfo();
+            ag.State = "busy";
+            ag.Activity = "正在执行 bash：dotnet build";
+            ag.Tool = "bash";
+            ag.Project = "TrofeoLCD-利民9.16寸仪表盘";
+            ag.Model = "deepseek-v4-flash";
+            ag.Provider = "deepseek";
+            ag.Turn = 12;
+            ag.Step = 3;
+            ag.LastText = "已读完 ArkTS 渲染器，接下来把横屏与竖屏两条路径翻译成 System.Drawing 的绘制调用，"
+                + "并逐块核对面板坐标与字号。\n第二行用来验证折行与省略号逻辑。";
+            st.Data.Agent = ag;
+
+            List<TodoItem> todos = new List<TodoItem>();
+            todos.Add(Todo("抄写 Theme.ets 的颜色/布局/字体令牌", "completed"));
+            todos.Add(Todo("移植横屏 5 列布局与四个面板", "completed"));
+            todos.Add(Todo("移植竖屏 5 段布局", "in_progress"));
+            todos.Add(Todo("在 Win11 ARM64 虚拟机里编译验证", "pending"));
+            todos.Add(Todo("核对 fmtTokens / fitText / wrap 行为", "pending"));
+            todos.Add(Todo("这是一条特别长的待办，用来验证单行截断与省略号是否生效不会撑破面板", "pending"));
+            st.Data.Todos = todos;
+
+            TokenInfo tk = new TokenInfo();
+            tk.TodayInput = 28672;
+            tk.TodayOutput = 214784;
+            tk.TodayTotal = 243456;
+            tk.SessionTotal = 98765;
+            tk.ContextUsed = 81920;
+            tk.ContextWindow = 128000;
+            tk.CostUsd = 0.4213;
+            tk.CacheHitRate = 0.87;
+            st.Data.Tokens = tk;
+
+            SystemInfo sys = new SystemInfo();
+            sys.Cpu = 37.4;
+            sys.Cores = 8;
+            sys.MemUsed = 9120;
+            sys.MemTotal = 16384;
+            sys.Load1 = 1.24;
+            sys.Load5 = 0.98;
+            sys.Load15 = 0.75;
+            sys.UptimeSec = 286920;
+            sys.Host = "win11-arm64-vm";
+            sys.CpuTemp = 64.2;
+            st.Data.System = sys;
+
+            WeatherInfo wx = new WeatherInfo();
+            wx.Text = "多云";
+            wx.TempC = 27.4;
+            st.Data.Weather = wx;
+
+            LyricsInfo ly = new LyricsInfo();
+            ly.Line = "我用什么把你留住";
+            ly.Artist = "曹芙嘉";
+            ly.Title = "我用什么把你留住";
+            st.Data.Lyrics = ly;
+
+            st.Packets = 1234;
+            st.LastRxTs = State.NowMs() - 1500;   // Fresh=true，AgeSec()=1
+            return st;
+        }
+
+        private static TodoItem Todo(string content, string status)
+        {
+            TodoItem t = new TodoItem();
+            t.Content = content;
+            t.Status = status;
+            return t;
+        }
+
+        /// <summary>合成一张 1680×1120 的「VM 画面」，用来验证等比放入与黑边</summary>
+        private static Bitmap MakeFakeVmFrame()
+        {
+            Bitmap bmp = new Bitmap(1680, 1120, PixelFormat.Format32bppArgb);
+            using (Graphics g = Graphics.FromImage(bmp))
+            {
+                g.SmoothingMode = SmoothingMode.AntiAlias;
+                using (LinearGradientBrush bg = new LinearGradientBrush(
+                           new RectangleF(0, 0, 1680, 1120), Color.FromArgb(255, 12, 32, 52),
+                           Color.FromArgb(255, 48, 22, 70), LinearGradientMode.ForwardDiagonal))
+                {
+                    g.FillRectangle(bg, 0, 0, 1680, 1120);
+                }
+                using (Pen grid = new Pen(Color.FromArgb(70, 120, 200, 255), 2f))
+                {
+                    for (int x = 0; x <= 1680; x += 120) g.DrawLine(grid, x, 0, x, 1120);
+                    for (int y = 0; y <= 1120; y += 120) g.DrawLine(grid, 0, y, 1680, y);
+                }
+                using (Font f = new Font("Microsoft YaHei", 96f, FontStyle.Bold, GraphicsUnit.Pixel))
+                using (SolidBrush b = new SolidBrush(Color.FromArgb(255, 235, 245, 255)))
+                {
+                    g.DrawString("VM 测试帧 1680×1120", f, b, new PointF(120, 460));
+                }
+                using (Pen border = new Pen(Color.FromArgb(255, 34, 211, 238), 8f))
+                {
+                    g.DrawRectangle(border, 6, 6, 1668, 1108);
+                }
+            }
+            return bmp;
+        }
+
+        private static long SaveJpeg(Bitmap bmp, string path, long quality)
+        {
+            string dir = Path.GetDirectoryName(path);
+            if (!string.IsNullOrEmpty(dir) && !Directory.Exists(dir))
+            {
+                Directory.CreateDirectory(dir);
+            }
+            ImageCodecInfo jpg = null;
+            ImageCodecInfo[] codecs = ImageCodecInfo.GetImageEncoders();
+            for (int i = 0; i < codecs.Length; i++)
+            {
+                if (codecs[i].FormatID == ImageFormat.Jpeg.Guid) jpg = codecs[i];
+            }
+            if (jpg == null)
+            {
+                bmp.Save(path, ImageFormat.Jpeg);
+            }
+            else
+            {
+                using (EncoderParameters ep = new EncoderParameters(1))
+                {
+                    ep.Param[0] = new EncoderParameter(System.Drawing.Imaging.Encoder.Quality, quality);
+                    bmp.Save(path, jpg, ep);
+                }
+            }
+            FileInfo fi = new FileInfo(path);
+            return fi.Exists ? fi.Length : -1;
+        }
+
+        // ==================================================================
+
+        public static string ExeDir()
+        {
+            try
+            {
+                string p = System.Reflection.Assembly.GetExecutingAssembly().Location;
+                if (!string.IsNullOrEmpty(p)) return Path.GetDirectoryName(p);
+            }
+            catch (Exception) { }
+            return Directory.GetCurrentDirectory();
+        }
+
+        private static bool Has(string[] args, string flag)
+        {
+            for (int i = 0; i < args.Length; i++)
+            {
+                if (string.Equals(args[i], flag, StringComparison.OrdinalIgnoreCase)) return true;
+            }
+            return false;
+        }
+
+        private static string ArgValue(string[] args, string flag)
+        {
+            for (int i = 0; i < args.Length - 1; i++)
+            {
+                if (string.Equals(args[i], flag, StringComparison.OrdinalIgnoreCase)) return args[i + 1];
+            }
+            return null;
+        }
+
+        private static string Fixed(double v, int digits)
+        {
+            return v.ToString("F" + digits.ToString(Inv), Inv);
+        }
+    }
+}

@@ -1,0 +1,19 @@
+{
+  "name": "dsh-lcd-bridge",
+  "version": "1.0.0",
+  "description": "进程内数据桥：读 DSH 会话（node 原生 zstd）→ UDP 推给 TrofeoLCD 屏幕",
+  "type": "module",
+  "main": "index.mjs",
+  "dsh": {
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    }
+  },
+  "files": [
+    "index.mjs",
+    "session.mjs",
+    "printer.mjs",
+    "balance.mjs",
+    "cordis.patch.yml"
+  ]
+}

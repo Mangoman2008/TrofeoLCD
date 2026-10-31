@@ -1,0 +1,16 @@
+{
+  "string": [
+    {
+      "name": "module_desc",
+      "value": "利民 Trofeo Vision 9.16 LCD 仪表盘"
+    },
+    {
+      "name": "EntryAbility_desc",
+      "value": "DSH 副屏控制界面"
+    },
+    {
+      "name": "EntryAbility_label",
+      "value": "DSH 副屏"
+    }
+  ]
+}

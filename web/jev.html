@@ -1,0 +1,789 @@
+<!DOCTYPE html>
+<!--
+  jev.html —— JEV（TypeSafe Jev / System One 决策模型）决策光路
+
+  形态：state 节点 ──光导线──▶ JEV 核心 ──每条问题一根导线──▶ 判定节点
+        · 判定节点上是概率环 + 主答案 + confidence
+        · 线上有流动的光点；结果到达时逐条点亮
+        · 颜色语义沿用官方 jev-xray：蓝=否、粉=是、灰=不确定（p≈0.5 就该自己看一眼）
+        · choice=青、score=紫、noul=按概率蓝→灰→粉
+
+  数据：POST /api/ask（单次判定）、POST /api/scan + SSE（批量：一个目录逐文件提问）
+  由 bridge/jev-hud.mjs 提供；没有 TYPESAFE_API_KEY 时走内置模拟判定器并标 SIMULATED。
+-->
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<title>JEV 决策光路 · System One</title>
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<style>
+  :root{
+    --bg:#03060b; --wire:#16283a; --wire2:#0b1620; --wire-hi:#2b4e6d;
+    --text:#d3e6f5; --dim:#7b93a8; --dim2:#4f6b83;
+    --fiber:#39d0ff; --fiber2:#a06bff; --yes:#ff6fd8; --no:#39a8ff; --unsure:#8a97a3;
+    --green:#5ef2a0; --amber:#ffc247; --red:#ff5f56;
+    --mono:ui-monospace,SFMono-Regular,"JetBrains Mono",Menlo,Consolas,monospace;
+  }
+  *{box-sizing:border-box}
+  html,body{height:100%}
+  body{margin:0;color:var(--text);overflow:hidden;font:13px/1.5 -apple-system,"HarmonyOS Sans SC","Noto Sans CJK SC",system-ui,sans-serif;
+    background:
+      linear-gradient(#081320 1px,transparent 1px) 0 0/100% 32px,
+      linear-gradient(90deg,#081320 1px,transparent 1px) 0 0/32px 100%,
+      radial-gradient(900px 320px at 10% -10%,#07283a 0%,transparent 60%),
+      radial-gradient(800px 340px at 95% 6%,#190f36 0%,transparent 55%),
+      linear-gradient(180deg,#03060b,#010306);}
+  .app{height:100vh;display:grid;grid-template-columns:400px minmax(0,1fr) 430px;grid-template-rows:auto minmax(0,1fr);gap:10px;padding:10px}
+  header{grid-column:1/4;position:relative;display:flex;align-items:center;gap:10px;flex-wrap:wrap;padding:9px 13px;
+    border:1px solid var(--wire);border-radius:3px;background:linear-gradient(180deg,#061019e6,#03070c99)}
+  header::before,header::after{content:"";position:absolute;width:9px;height:9px;border:1px solid var(--fiber);opacity:.7}
+  header::before{left:-1px;top:-1px;border-right:0;border-bottom:0}
+  header::after{right:-1px;bottom:-1px;border-left:0;border-top:0}
+  .brand{display:flex;align-items:baseline;gap:9px}
+  .brand b{color:#eaf7ff;font-size:15px;font-weight:600;letter-spacing:2px;text-shadow:0 0 8px #39d0ff88}
+  .brand span{color:var(--dim2);font-size:10.5px;font-family:var(--mono);letter-spacing:.6px}
+  .chip{display:inline-flex;align-items:center;gap:6px;padding:3px 10px;font-size:11.5px;color:var(--dim);
+    border:1px solid var(--wire);border-radius:2px;background:#03070c99;max-width:340px;overflow:hidden;white-space:nowrap;text-overflow:ellipsis}
+  .chip b{color:#8fe6ff;font-weight:500}
+  .mode{display:inline-flex;align-items:center;gap:7px;padding:3px 11px;font-size:11.5px;font-weight:600;border:1px solid;border-radius:2px;letter-spacing:.5px}
+  .mode.real{color:var(--green);border-color:#14513a;background:#04170f}
+  .mode.mock{color:var(--amber);border-color:#5c4410;background:#1a1305}
+  .mode .dot{width:7px;height:7px;border-radius:50%;background:currentColor;box-shadow:0 0 8px currentColor;animation:breathe 1.6s ease-in-out infinite}
+  @keyframes breathe{0%,100%{opacity:1}50%{opacity:.3}}
+  .spacer{flex:1}
+  .clock{font-family:var(--mono);font-size:13px;color:#8fe6ff}
+
+  .col{display:flex;flex-direction:column;gap:10px;min-height:0;overflow-y:auto;padding-right:2px}
+  .col::-webkit-scrollbar{width:6px}
+  .col::-webkit-scrollbar-thumb{background:#16303f}
+  .card{position:relative;flex:none;border:1px solid var(--wire);border-radius:3px;background:linear-gradient(180deg,#05101acc,#03070c66)}
+  .card::before,.card::after{content:"";position:absolute;width:8px;height:8px;border:1px solid var(--wire-hi);pointer-events:none}
+  .card::before{left:-1px;top:-1px;border-right:0;border-bottom:0}
+  .card::after{right:-1px;bottom:-1px;border-left:0;border-top:0}
+  .card>h3{position:relative;margin:0;padding:7px 11px;font-size:11.5px;font-weight:600;letter-spacing:1.1px;color:#d8ecfb;
+    border-bottom:1px solid var(--wire);display:flex;align-items:center;gap:8px}
+  .card>h3::after{content:"";position:absolute;left:0;right:0;bottom:-1px;height:1px;
+    background:linear-gradient(90deg,transparent,var(--fiber) 25%,var(--fiber2) 65%,transparent);opacity:.5;
+    background-size:220% 100%;animation:scan 6s linear infinite}
+  @keyframes scan{0%{background-position:120% 0}100%{background-position:-120% 0}}
+  .card>h3 .tag{margin-left:auto;font-size:10.5px;color:var(--dim2);font-family:var(--mono);font-weight:400}
+  .body{padding:10px 11px}
+  textarea,select,input{font:inherit;color:var(--text);background:#02050a;border:1px solid var(--wire);border-radius:2px;padding:6px 8px;width:100%}
+  textarea{resize:vertical;min-height:110px;font-family:var(--mono);font-size:11.5px;line-height:1.45}
+  textarea:focus,select:focus,input:focus{outline:none;border-color:var(--fiber);box-shadow:0 0 10px #39d0ff33}
+  button{font:inherit;font-size:11.5px;color:var(--dim);background:#04090f;border:1px solid var(--wire);border-radius:2px;padding:5px 9px;cursor:pointer;transition:.14s}
+  button:hover{color:#eaf7ff;border-color:var(--fiber);box-shadow:0 0 10px #39d0ff44,inset 0 0 10px #39d0ff14}
+  button:active{transform:translateY(1px)}
+  button.on{color:#02120c;background:linear-gradient(180deg,var(--green),#2fd07f);border-color:var(--green)}
+  button.primary{color:#eaf7ff;border-color:var(--fiber);background:#06243033;box-shadow:0 0 12px #39d0ff33}
+  button[disabled]{opacity:.45;cursor:not-allowed}
+  .btns{display:flex;gap:6px;flex-wrap:wrap}
+  .row{display:flex;align-items:center;gap:8px;margin:5px 0}
+  .row .k{color:var(--dim2);font-size:11px;min-width:70px;flex:none}
+  .row .v{font-size:12px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+  .mono{font-family:var(--mono)}
+  .num{font-family:var(--mono);font-variant-numeric:tabular-nums}
+  .muted{color:var(--dim)}
+  .small{font-size:11px}
+  .lens{display:grid;grid-template-columns:1fr 1fr;gap:5px}
+  .lens button{display:flex;align-items:center;gap:6px;justify-content:flex-start;text-align:left;padding:5px 7px;font-size:11px}
+  .lens button .t{font-family:var(--mono);font-size:9.5px;color:var(--dim2);margin-left:auto}
+  .lens button.on .t{color:#02120c}
+  .kv{border:1px solid var(--wire2);border-left:1px solid var(--fiber);border-radius:2px;padding:5px 8px;background:#02050a}
+  .kv .k{font-size:10px;color:var(--dim2)}
+  .kv .v{font-size:14px;font-family:var(--mono);color:#eaf7ff}
+  .grid2{display:grid;grid-template-columns:1fr 1fr;gap:7px}
+  .q{display:flex;align-items:center;gap:6px;margin:4px 0;font-size:11.5px}
+  .q input[type=text]{flex:1;font-family:var(--mono);font-size:11px}
+  .q select{width:82px;flex:none}
+  pre{margin:6px 0 0;padding:7px 9px;background:#010409;border:1px solid var(--wire2);border-left:1px solid var(--wire-hi);
+    border-radius:2px;font-family:var(--mono);font-size:10.5px;color:#9fb6c8;white-space:pre-wrap;word-break:break-word;max-height:260px;overflow:auto}
+  details summary{cursor:pointer;color:var(--dim2);font-size:11px;margin-top:4px;list-style:none}
+  details summary::-webkit-details-marker{display:none}
+  details summary::before{content:"▸ ";color:var(--fiber)}
+  details[open] summary::before{content:"▾ "}
+
+  /* ── 中间：决策光路 ── */
+  .center{min-height:0;display:flex;flex-direction:column;gap:10px}
+  .stage{position:relative;flex:1;min-height:0;overflow:auto;border:1px solid var(--wire);border-radius:3px;
+    background:radial-gradient(700px 260px at 30% 40%,#05141f99,transparent 70%),linear-gradient(180deg,#02060bcc,#01030699)}
+  .stage svg{display:block;width:100%;height:auto;min-height:100%}
+  .stage .hint{position:absolute;left:0;right:0;top:46%;text-align:center;color:var(--dim2);font-size:12px}
+  .wirebase{fill:none;stroke:#12283a;stroke-width:1.3}
+  .wirelive{fill:none;stroke-width:1.8;stroke-linecap:round;stroke-dasharray:3 11;animation:dash 1s linear infinite}
+  .wirelive.cyan{stroke:var(--fiber);filter:drop-shadow(0 0 4px #39d0ffaa)}
+  .wirelive.violet{stroke:var(--fiber2);filter:drop-shadow(0 0 4px #a06bffaa)}
+  .wirelive.yes{stroke:var(--yes);filter:drop-shadow(0 0 4px #ff6fd8aa)}
+  .wirelive.no{stroke:var(--no);filter:drop-shadow(0 0 4px #39a8ffaa)}
+  .wirelive.unsure{stroke:var(--unsure)}
+  @keyframes dash{to{stroke-dashoffset:-28}}
+  .nd{fill:#02060b;stroke:var(--wire-hi);stroke-width:1.2}
+  .nd.sel{stroke:#eaf7ff;stroke-width:1.6}
+  .ring-bg{fill:none;stroke:#132a3a;stroke-width:4}
+  .ring-fg{fill:none;stroke-width:4;stroke-linecap:round;transform:rotate(-90deg);transform-origin:center}
+  text{font-family:var(--mono)}
+  .t-lab{fill:#cfe6f7;font-size:11.5px}
+  .t-sub{fill:#5f7d94;font-size:9.5px}
+  .t-val{fill:#eaf7ff;font-size:13px;font-weight:600}
+  .t-dim{fill:#7b93a8;font-size:10px}
+  .core-ring{fill:none;stroke:#17364b;stroke-width:1}
+  .core-spin{fill:none;stroke:var(--fiber);stroke-width:1.4;stroke-dasharray:4 10;transform-origin:center;animation:spin 9s linear infinite;opacity:.75}
+  .core-spin2{fill:none;stroke:var(--fiber2);stroke-width:1.2;stroke-dasharray:2 14;transform-origin:center;animation:spin 14s linear infinite reverse;opacity:.6}
+  @keyframes spin{to{transform:rotate(360deg)}}
+
+  .sbar{display:flex;align-items:center;gap:8px;padding:7px 10px;border:1px solid var(--wire);border-radius:3px;background:#040a10cc}
+  .sbar .pr{flex:1;height:6px;border:1px solid var(--wire2);background:#010409;overflow:hidden}
+  .sbar .pr>i{display:block;height:100%;width:0;background:linear-gradient(90deg,#0d6d8f,var(--fiber));box-shadow:0 0 8px #39d0ffaa;transition:width .3s}
+  .bars{display:flex;flex-direction:column;gap:5px;margin-top:2px}
+  .pb{display:grid;grid-template-columns:118px 40px 1fr;gap:6px;align-items:center;font-size:11px}
+  .pb .n{color:var(--dim);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+  .pb .c{font-family:var(--mono);text-align:right;color:#a9d8ef}
+  .pb .b{height:5px;background:#010409;border:1px solid var(--wire2);overflow:hidden}
+  .pb .b>i{display:block;height:100%}
+  .verdict{border:1px solid var(--wire2);border-left:2px solid var(--fiber);border-radius:2px;padding:7px 9px;margin-bottom:7px;background:#02050a}
+  .verdict.choice{border-left-color:var(--fiber)}
+  .verdict.score{border-left-color:var(--fiber2)}
+  .verdict.noul{border-left-color:var(--yes)}
+  .verdict .h{display:flex;align-items:center;gap:7px}
+  .verdict .lab{font-size:12px;color:#eaf7ff}
+  .verdict .ty{font-family:var(--mono);font-size:9.5px;color:var(--dim2);border:1px solid var(--wire2);border-radius:1px;padding:0 4px}
+  .verdict .main{margin-left:auto;font-family:var(--mono);font-size:12.5px;color:#eaf7ff}
+  .verdict .meta{font-size:10.5px;color:var(--dim2);margin-top:2px}
+  .toast{position:fixed;right:14px;bottom:14px;display:flex;flex-direction:column;gap:6px;z-index:50}
+  .toast div{padding:7px 12px;font-size:12px;max-width:440px;background:#040a10ee;border:1px solid var(--wire);
+    border-left:2px solid var(--green);border-radius:2px;box-shadow:0 6px 24px #000a}
+  .toast div.err{border-left-color:var(--red)}
+  .toast div.warn{border-left-color:var(--amber)}
+  .scanrow{display:grid;grid-template-columns:1fr 56px;gap:6px;align-items:center;font-size:11px;padding:3px 0;border-bottom:1px solid #081320}
+  .scanrow .f{font-family:var(--mono);color:#a9d8ef;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+  .scanrow .v{font-family:var(--mono);text-align:right}
+</style>
+</head>
+<body>
+<div class="app">
+  <header>
+    <div class="brand"><b>JEV</b><span>DECISION OPTICS · System One</span></div>
+    <span class="mode mock" id="mode"><i class="dot"></i><span>检测中…</span></span>
+    <span class="chip" id="c-model">模型 <b>—</b></span>
+    <span class="chip" id="c-key">Key <b>—</b></span>
+    <span class="spacer"></span>
+    <span class="chip" id="c-stats">请求 <b>0</b></span>
+    <span class="chip" id="c-tokens">Token <b>0</b></span>
+    <span class="chip" id="c-cost">成本 <b>$0</b></span>
+    <span class="chip" id="c-p50">p50 <b>—</b></span>
+    <span class="clock" id="clock">--:--:--</span>
+  </header>
+
+  <!-- ══════════ 左：输入 / 问题 / 批量 ══════════ -->
+  <div class="col">
+    <div class="card">
+      <h3>STATE<span class="tag" id="state-tag"></span></h3>
+      <div class="body">
+        <textarea id="state" placeholder="要判定的内容：一段文本、一段代码、或一个 JSON 对象。&#10;Jev 不生成文本，只对下面这些问题给出带概率的判定。"></textarea>
+        <div class="btns" style="margin-top:7px">
+          <button id="sampleBtn">载入示例</button>
+          <button id="fileBtn">从文件读取</button>
+          <button id="clearBtn">清空</button>
+        </div>
+        <div class="row" style="margin-top:7px"><span class="k">文件路径</span>
+          <input type="text" id="filePath" class="mono" placeholder="/绝对/路径（配合"从文件读取"）" style="font-size:11px"></div>
+        <div class="small muted" id="state-note" style="margin-top:4px"></div>
+      </div>
+    </div>
+
+    <div class="card">
+      <h3>问题（可多选，一次请求全部判定）<span class="tag" id="lens-tag"></span></h3>
+      <div class="body">
+        <div class="lens" id="lensBox"></div>
+        <div style="margin-top:9px" class="small muted">自定义问题（可选，追加进同一次请求）</div>
+        <div class="q">
+          <input type="text" id="cqKey" placeholder="key（英文）" value="custom">
+          <select id="cqType"><option value="noul">noul</option><option value="choice">choice</option><option value="score">score</option></select>
+        </div>
+        <div class="q"><input type="text" id="cqInstr" placeholder="问题本身，例如：这段代码是否处理用户输入？"></div>
+        <div class="q"><input type="text" id="cqCrit" placeholder="choice/score 的选项定义，逗号分隔（noul 可留空）"></div>
+        <div class="btns" style="margin-top:9px">
+          <button class="primary" id="runBtn">▶ 运行判定</button>
+          <button id="reqBtn">看请求 JSON</button>
+        </div>
+      </div>
+    </div>
+
+    <div class="card">
+      <h3>批量扫描（像 jev-xray：一个目录逐文件提问）<span class="tag" id="scan-tag"></span></h3>
+      <div class="body">
+        <div class="row"><span class="k">目录</span>
+          <input type="text" id="scanDir" class="mono" style="font-size:11px" value="/storage/Users/currentUser/WorkBuddy/TrofeoLCD/entry/src/main/ets"></div>
+        <div class="row"><span class="k">用哪个问题</span>
+          <select id="scanQ" style="flex:1"></select></div>
+        <div class="row"><span class="k">最多文件</span>
+          <input type="text" id="scanMax" value="24" style="width:70px"></div>
+        <div class="btns" style="margin-top:7px">
+          <button class="primary" id="scanBtn">▶ 开始扫描</button>
+          <button id="scanListBtn">先看文件列表</button>
+        </div>
+        <div class="sbar" style="margin-top:8px"><span class="small muted" id="scanProg">未开始</span>
+          <span class="pr"><i id="scanBar"></i></span></div>
+        <div id="scanRows" style="margin-top:6px;max-height:230px;overflow:auto"></div>
+      </div>
+    </div>
+  </div>
+
+  <!-- ══════════ 中：决策光路 ══════════ -->
+  <div class="center">
+    <div class="sbar">
+      <span class="small muted" id="flowTitle">决策光路</span>
+      <span class="pr"><i id="flowBar"></i></span>
+      <span class="small num" id="flowMeta"></span>
+    </div>
+    <div class="stage" id="stage">
+      <div class="hint" id="hint">左侧填 STATE、勾问题，点「运行判定」<br>光路会把 state 送到 JEV 核心，再把每条判定沿导线点亮</div>
+      <svg id="flow" viewBox="0 0 1000 460" preserveAspectRatio="xMidYMid meet"></svg>
+    </div>
+  </div>
+
+  <!-- ══════════ 右：判定明细 / 交换内容 ══════════ -->
+  <div class="col">
+    <div class="card">
+      <h3>判定明细<span class="tag" id="verdict-tag"></span></h3>
+      <div class="body" id="verdicts"><div class="small muted">还没有判定结果</div></div>
+    </div>
+
+    <div class="card">
+      <h3>交换内容（可核对结构）<span class="tag" id="io-tag"></span></h3>
+      <div class="body">
+        <details id="reqDetails"><summary>请求 JSON（key 用占位符，真实 key 不出服务端）</summary><pre id="reqJson">—</pre></details>
+        <details id="resDetails"><summary>响应 JSON（Jev 原样返回）</summary><pre id="resJson">—</pre></details>
+        <details id="selDetails"><summary>选中节点的判定</summary><pre id="selJson">—</pre></details>
+      </div>
+    </div>
+
+    <div class="card">
+      <h3>概率分布<span class="tag" id="dist-tag"></span></h3>
+      <div class="body"><div class="bars" id="dist"><div class="small muted">运行后显示每个类目/档位的概率</div></div></div>
+    </div>
+  </div>
+</div>
+
+<div class="toast" id="toast"></div>
+
+<script>
+const $ = (id) => document.getElementById(id)
+const esc = (s) => String(s ?? '').replace(/[&<>"']/g, (c) => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]))
+const fmtTok = (n) => (Number(n) || 0).toLocaleString('en-US')
+const fmtMs = (n) => (Number(n) || 0).toFixed(0) + ' ms'
+const fmtUsd = (n) => '$' + (Number(n) || 0).toFixed(4)
+const clip = (s, n) => { s = String(s ?? ''); return s.length > n ? s.slice(0, n - 1) + '…' : s }
+function toast(msg, kind) {
+  const d = document.createElement('div')
+  if (kind) d.className = kind
+  d.textContent = msg
+  $('toast').appendChild(d)
+  setTimeout(() => d.remove(), 5200)
+}
+
+let INFO = null
+let ANSWER = null            // { answers, usage, latencyMs, simulated, model }
+let QUESTIONS = {}           // 本次发送的问题定义
+let SELECTED = null
+let SCAN = { rows: [], total: 0, done: 0, running: false, question: null }
+
+/* ───────── 颜色语义：蓝=否 / 灰=不确定 / 粉=是（沿用官方 jev-xray 的读法）───────── */
+function noulColor(p) {
+  if (p >= 0.62) return { stroke: '#ff6fd8', cls: 'yes' }
+  if (p <= 0.38) return { stroke: '#39a8ff', cls: 'no' }
+  return { stroke: '#8a97a3', cls: 'unsure' }
+}
+function answerColor(a) {
+  if (!a) return { stroke: '#2b4e6d', cls: 'unsure' }
+  if (a.type === 'choice') return { stroke: '#39d0ff', cls: 'cyan' }
+  if (a.type === 'score') return { stroke: '#a06bff', cls: 'violet' }
+  const p = a.noul ?? 0.5
+  return noulColor(p)
+}
+/** 主答案的短文本 */
+function answerMain(a) {
+  if (!a) return '—'
+  if (a.type === 'choice') return a.choice || '—'
+  if (a.type === 'score') return (a.score ?? 0).toFixed(2)
+  return (a.noul ?? 0).toFixed(2)
+}
+/** 归一化到 0..1，用来画概率环 */
+function answerNorm(a) {
+  if (!a) return 0
+  if (a.type === 'noul') return a.noul ?? 0
+  if (a.type === 'score') {
+    const n = Object.keys(a.probabilities || {}).length || 1
+    return Math.max(0, Math.min(1, (a.score ?? 0) / Math.max(1, n - 1)))
+  }
+  const probs = Object.values(a.probabilities || {})
+  return probs.length ? Math.max(...probs) : 0
+}
+function confidenceOf(a) {
+  if (!a) return null
+  if (a.type === 'noul') return null                  // noul 的概率本身就是答案
+  return typeof a.confidence === 'number' ? a.confidence : null
+}
+
+/* ───────── 光路绘制 ───────── */
+/**
+ * 布局：左 STATE 节点 → 中 JEV 核心 → 右 每条问题一个判定节点。
+ * 每条导线先画一条暗底（wirebase，永远在），上面叠一条发光流动线（wirelive）：
+ *  · 未判定：不显示 live（只有暗底）
+ *  · 判定中：live 用青色/紫色流动
+ *  · 判定完成：live 用该判定的语义色，并且停止动画（稳定下来）
+ */
+function renderFlow() {
+  const svg = $('flow')
+  const items = ANSWER
+    ? Object.keys(QUESTIONS).map((k) => ({ key: k, spec: QUESTIONS[k], answer: ANSWER.answers?.[k] || null }))
+    : SCAN.rows.map((r) => ({ key: r.rel, spec: SCAN.question?.spec || {}, answer: r.answer, scan: true }))
+
+  if (!items.length) {
+    svg.setAttribute('viewBox', '0 0 1000 460')
+    svg.innerHTML = ''
+    $('hint').style.display = ''
+    return
+  }
+  $('hint').style.display = 'none'
+
+  const rowH = 76
+  const H = Math.max(300, 90 + items.length * rowH)
+  const W = 1000
+  svg.setAttribute('viewBox', `0 0 ${W} ${H}`)
+  svg.setAttribute('height', H + 'px')
+
+  const stateText = $('state').value || ''
+  const stateLabel = SCAN.rows.length && !ANSWER ? SCAN.question?.key || 'scan' : clip(stateText.replace(/\s+/g, ' '), 46) || '（空）'
+
+  const coreX = 330
+  const coreY = H / 2
+  const ansX = 470
+  const ansW = W - ansX - 16
+
+  let out = []
+  // 背景网格
+  out.push(`<defs>
+    <radialGradient id="coreGlow" cx="50%" cy="50%" r="50%">
+      <stop offset="0%" stop-color="#39d0ff" stop-opacity="0.20"/>
+      <stop offset="70%" stop-color="#a06bff" stop-opacity="0.06"/>
+      <stop offset="100%" stop-color="#000" stop-opacity="0"/>
+    </radialGradient>
+  </defs>`)
+
+  // STATE 节点
+  const sx = 16, sw = 210, sh = 74
+  out.push(`<rect class="nd" x="${sx}" y="${coreY - sh / 2}" width="${sw}" height="${sh}" rx="3"/>`)
+  out.push(`<text class="t-lab" x="${sx + 12}" y="${coreY - sh / 2 + 22}">STATE</text>`)
+  out.push(`<text class="t-sub" x="${sx + 12}" y="${coreY - sh / 2 + 40}">${esc(clip(stateText.replace(/\s+/g, ' '), 30) || '（空）')}</text>`)
+  out.push(`<text class="t-dim" x="${sx + 12}" y="${coreY - sh / 2 + 58}">${stateText.length} 字符 ≈ ${Math.round(stateText.length / 4)} tok</text>`)
+
+  // STATE → 核心 的干线
+  const trunkCls = ANSWER ? 'yes' : (SCAN.running ? 'cyan' : 'unsure')
+  out.push(`<path class="wirebase" d="M ${sx + sw} ${coreY} C ${sx + sw + 40} ${coreY}, ${coreX - 60} ${coreY}, ${coreX - 34} ${coreY}"/>`)
+  if (ANSWER || SCAN.running) {
+    out.push(`<path class="wirelive ${trunkCls}" d="M ${sx + sw} ${coreY} C ${sx + sw + 40} ${coreY}, ${coreX - 60} ${coreY}, ${coreX - 34} ${coreY}"/>`)
+  }
+
+  // JEV 核心
+  const done = items.filter((it) => it.answer).length
+  out.push(`<circle cx="${coreX}" cy="${coreY}" r="86" fill="url(#coreGlow)"/>`)
+  out.push(`<circle class="core-ring" cx="${coreX}" cy="${coreY}" r="46"/>`)
+  out.push(`<circle class="core-ring" cx="${coreX}" cy="${coreY}" r="34"/>`)
+  out.push(`<circle class="core-spin" cx="${coreX}" cy="${coreY}" r="52"/>`)
+  out.push(`<circle class="core-spin2" cx="${coreX}" cy="${coreY}" r="60"/>`)
+  out.push(`<text class="t-val" x="${coreX}" y="${coreY + 2}" text-anchor="middle">JEV</text>`)
+  out.push(`<text class="t-sub" x="${coreX}" y="${coreY + 20}" text-anchor="middle">system one</text>`)
+  out.push(`<text class="t-dim" x="${coreX}" y="${coreY + 78}" text-anchor="middle">${done}/${items.length} 判定完成</text>`)
+
+  // 每个问题的判定节点
+  items.forEach((it, i) => {
+    const y = 46 + i * rowH + rowH / 2
+    const a = it.answer
+    const col = answerColor(a)
+    const cx1 = coreX + 34, cy1 = coreY
+    const cx2 = ansX, cy2 = y
+    const d = `M ${cx1} ${cy1} C ${cx1 + 60} ${cy1}, ${cx2 - 60} ${cy2}, ${cx2} ${cy2}`
+    out.push(`<path class="wirebase" d="${d}"/>`)
+    if (a) out.push(`<path class="wirelive" style="stroke:${col.stroke};filter:drop-shadow(0 0 4px ${col.stroke}aa);animation:none" d="${d}"/>`)
+    else out.push(`<path class="wirelive cyan" d="${d}"/>`)
+
+    // 节点框
+    const sel = SELECTED === it.key ? ' sel' : ''
+    out.push(`<rect class="nd${sel}" data-k="${esc(it.key)}" x="${ansX}" y="${y - 29}" width="${ansW}" height="58" rx="3" style="cursor:pointer"/>`)
+    // 概率环
+    const rc = ansX + ansW - 34
+    const norm = answerNorm(a)
+    const C = 2 * Math.PI * 15
+    out.push(`<circle class="ring-bg" cx="${rc}" cy="${y}" r="15"/>`)
+    out.push(`<circle class="ring-fg" cx="${rc}" cy="${y}" r="15" stroke="${a ? col.stroke : '#1b3b50'}"
+      stroke-dasharray="${(C * norm).toFixed(1)} ${C.toFixed(1)}"/>`)
+    out.push(`<text class="t-dim" x="${rc}" y="${y + 3}" text-anchor="middle" style="font-size:9px">${a ? Math.round(norm * 100) + '%' : ''}</text>`)
+    // 文本
+    const lab = it.scan ? clip(it.key, 34) : (it.spec?.label || it.key)
+    const type = it.spec?.type || a?.type || ''
+    out.push(`<text class="t-lab" x="${ansX + 13}" y="${y - 6}">${esc(lab)}</text>`)
+    out.push(`<text class="t-sub" x="${ansX + 13}" y="${y + 10}">${esc(type)}${type === 'choice' && a ? ' · 概率最高项' : ''}</text>`)
+    const cf = confidenceOf(a)
+    out.push(`<text class="t-dim" x="${ansX + 13}" y="${y + 24}">${
+      a ? (a.type === 'noul'
+        ? 'P(真) = ' + a.noul.toFixed(2) + (a.noul > 0.38 && a.noul < 0.62 ? ' · 不确定，自己看一眼' : '')
+        : 'confidence ' + (cf === null ? '—' : cf.toFixed(2))) : '等待判定…'}</text>`)
+    out.push(`<text class="t-val" x="${rc - 26}" y="${y + 4}" text-anchor="end" style="font-size:14px;fill:${a ? col.stroke : '#3f5a6e'}">${a ? esc(clip(answerMain(a), 14)) : '—'}</text>`)
+  })
+
+  svg.innerHTML = out.join('')
+  for (const rect of svg.querySelectorAll('rect[data-k]')) {
+    rect.addEventListener('click', () => { SELECTED = rect.dataset.k; renderFlow(); renderSelected(); renderDist() })
+  }
+}
+
+/* ───────── 右侧：判定明细 / 分布 / JSON ───────── */
+function renderVerdicts() {
+  const box = $('verdicts')
+  if (!ANSWER) { box.innerHTML = '<div class="small muted">还没有判定结果</div>'; $('verdict-tag').textContent = ''; return }
+  const keys = Object.keys(QUESTIONS)
+  const sim = ANSWER.simulated ? ' · SIMULATED' : ''
+  $('verdict-tag').textContent = keys.length + ' 条' + sim
+  box.innerHTML = keys.map((k) => {
+    const a = ANSWER.answers?.[k]
+    const spec = QUESTIONS[k] || {}
+    const col = answerColor(a)
+    const cf = confidenceOf(a)
+    if (!a) return `<div class="verdict"><div class="h"><span class="lab">${esc(spec.label || k)}</span><span class="ty">${esc(spec.type || '')}</span></div><div class="meta">没有返回这条判定</div></div>`
+    return `<div class="verdict ${esc(a.type)}">
+      <div class="h"><span class="lab">${esc(spec.label || k)}</span><span class="ty">${esc(a.type)}</span>
+        <span class="main" style="color:${col.stroke}">${esc(answerMain(a))}</span></div>
+      <div class="meta">${a.type === 'noul'
+        ? 'P(真) = ' + a.noul.toFixed(3) + (a.noul > 0.38 && a.noul < 0.62 ? ' · 接近 0.5：模型自己也拿不准' : '')
+        : 'confidence ' + (cf === null ? '—' : cf.toFixed(3)) + (cf !== null && cf < 0.5 ? ' · 偏低：别只信主答案' : '')}
+        ${a.legend ? ' · 档位：' + esc(Object.entries(a.legend).map(([n, t]) => n + '=' + t).slice(0, 3).join(' / ')) + (Object.keys(a.legend).length > 3 ? ' …' : '') : ''}</div>
+      <details><summary>原始判定</summary><pre>${esc(JSON.stringify(a, null, 2))}</pre></details>
+    </div>`
+  }).join('')
+}
+
+function renderDist() {
+  const box = $('dist')
+  if (!ANSWER) { box.innerHTML = '<div class="small muted">运行后显示每个类目/档位的概率</div>'; $('dist-tag').textContent = ''; return }
+  const key = SELECTED && QUESTIONS[SELECTED] ? SELECTED : Object.keys(QUESTIONS).find((k) => ANSWER.answers?.[k]?.probabilities)
+  const a = key ? ANSWER.answers[key] : null
+  if (!a || !a.probabilities) {
+    box.innerHTML = '<div class="small muted">选中的判定是 noul（只有单一概率，没有分布）</div>'
+    $('dist-tag').textContent = key || ''
+    return
+  }
+  const spec = QUESTIONS[key] || {}
+  const entries = Object.entries(a.probabilities)
+  $('dist-tag').textContent = (spec.label || key) + (a.legend ? ' · 档位' : '')
+  const label = (n) => a.legend?.[n] || (spec.criteria && !Array.isArray(spec.criteria) ? spec.criteria[n] : '') || n
+  box.innerHTML = entries.map(([n, p]) => {
+    const col = p >= 0.5 ? '#ff6fd8' : p >= 0.2 ? '#a06bff' : '#2b4e6d'
+    return `<div class="pb"><span class="n" title="${esc(label(n))}">${esc(clip(label(n), 26))}</span>
+      <span class="c">${(p * 100).toFixed(1)}%</span>
+      <span class="b"><i style="width:${(p * 100).toFixed(1)}%;background:${col};box-shadow:0 0 6px ${col}88"></i></span></div>`
+  }).join('')
+}
+
+function renderSelected() {
+  const a = SELECTED && ANSWER ? ANSWER.answers?.[SELECTED] : null
+  $('selJson').textContent = a ? JSON.stringify(a, null, 2) : '（未选中：点光路里的判定节点）'
+  if (SELECTED && !$('selDetails').open) $('selDetails').open = true
+}
+
+function buildQuestions() {
+  const q = {}
+  for (const b of document.querySelectorAll('#lensBox button.on')) {
+    const lens = (INFO.lenses || []).find((l) => l.key === b.dataset.k)
+    if (!lens) continue
+    q[lens.key] = lens.type === 'noul'
+      ? { type: 'noul', instructions: lens.instructions }
+      : { type: lens.type, instructions: lens.instructions, criteria: lens.criteria }
+  }
+  const key = $('cqKey').value.trim()
+  const instr = $('cqInstr').value.trim()
+  const type = $('cqType').value
+  const crit = $('cqCrit').value.split(',').map((s) => s.trim()).filter(Boolean)
+  if (key && instr) {
+    if (type === 'noul') q[key] = { type, instructions: instr }
+    else if (type === 'score') q[key] = { type, instructions: instr, criteria: crit.length ? crit : ['Low', 'Medium', 'High'] }
+    else {
+      const obj = {}
+      ;(crit.length ? crit : ['yes', 'no']).forEach((c) => { obj[c] = c })
+      q[key] = { type, instructions: instr, criteria: obj }
+    }
+  }
+  return q
+}
+
+function requestPreview() {
+  return JSON.stringify({
+    model: INFO?.model || 'jev-latest',
+    state: $('state').value,
+    questions: QUESTIONS,
+  }, null, 2).replace(/("Authorization".*)|(Bearer [A-Za-z0-9._-]+)/g, '$1') // 兜底：真 key 绝不出现在页面
+}
+
+/* ───────── 运行判定 ───────── */
+let flowBar = { t: 0, n: 0 }
+function setFlowProgress(done, total, label) {
+  $('flowBar').style.width = total ? ((done / total) * 100).toFixed(1) + '%' : '0%'
+  $('flowMeta').textContent = label || (total ? done + ' / ' + total : '')
+}
+
+async function run() {
+  const state = $('state').value
+  if (!state.trim()) return toast('先填 STATE（要判定的内容）', 'err')
+  QUESTIONS = buildQuestions()
+  if (!Object.keys(QUESTIONS).length) return toast('至少勾一个问题，或填一条自定义问题', 'err')
+
+  ANSWER = null
+  SELECTED = null
+  renderFlow(); renderVerdicts(); renderDist(); renderSelected()
+  $('flowTitle').textContent = '决策光路 · 判定中…'
+  setFlowProgress(0, Object.keys(QUESTIONS).length, '请求已发出')
+  $('reqJson').textContent = requestPreview()
+  $('runBtn').disabled = true
+
+  const t0 = performance.now()
+  let res
+  try {
+    const r = await fetch('/api/ask', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ state: parseStateIfJson(state), questions: QUESTIONS }),
+    })
+    res = await r.json()
+  } catch (e) {
+    $('runBtn').disabled = false
+    $('flowTitle').textContent = '决策光路'
+    return toast('请求失败：' + e.message, 'err')
+  }
+  $('runBtn').disabled = false
+  const wall = performance.now() - t0
+
+  if (!res.ok) {
+    $('flowTitle').textContent = '决策光路 · 失败'
+    $('resJson').textContent = res.error + '\n' + (res.body || '')
+    return toast('Jev 调用失败：' + (res.error || '未知'), 'err')
+  }
+
+  ANSWER = { answers: res.data?.answers || {}, usage: res.data?.usage || {}, model: res.data?.model || '', latencyMs: res.latencyMs, simulated: !!res.simulated }
+  $('resJson').textContent = JSON.stringify(res.data, null, 2)
+  $('io-tag').textContent = ANSWER.simulated ? 'SIMULATED' : (ANSWER.model || '')
+  $('flowTitle').textContent = '决策光路' + (ANSWER.simulated ? ' · SIMULATED（本地模拟，无 key）' : ' · ' + ANSWER.model)
+
+  // 逐条点亮（判定是一条条"到达"的，不是一次跳出）
+  const keys = Object.keys(QUESTIONS)
+  for (let i = 0; i < keys.length; i++) {
+    SELECTED = keys[i]
+    renderFlow(); renderVerdicts(); renderDist(); renderSelected()
+    setFlowProgress(i + 1, keys.length, `已判定 ${i + 1}/${keys.length}`)
+    await new Promise((r) => setTimeout(r, 90))
+  }
+  setFlowProgress(keys.length, keys.length, `${keys.length} 条判定 · ${Math.round(wall)}ms 往返 · ${ANSWER.latencyMs}ms 服务端`)
+  const u = ANSWER.usage || {}
+  toast(`判定完成：${keys.length} 条 · 输入 ${u.input_tokens || 0} tok · ${Math.round(wall)}ms` + (ANSWER.simulated ? '（SIMULATED）' : ''), ANSWER.simulated ? 'warn' : null)
+  refreshStats()
+}
+
+/** state 允许直接粘 JSON：是合法 JSON 就按对象发（官方文档鼓励结构化 state） */
+function parseStateIfJson(s) {
+  const t = s.trim()
+  if (!t.startsWith('{') && !t.startsWith('[')) return s
+  try {
+    return JSON.parse(t)
+  } catch {
+    return s
+  }
+}
+
+/* ───────── 批量扫描 ───────── */
+async function scanList() {
+  const dir = $('scanDir').value.trim()
+  try {
+    const r = await fetch('/api/files?dir=' + encodeURIComponent(dir) + '&max=200')
+    const j = await r.json()
+    if (!j.ok) return toast(j.error || '取文件失败', 'err')
+    $('scanRows').innerHTML = j.files.slice(0, 40).map((f) =>
+      `<div class="scanrow"><span class="f">${esc(f.rel)}</span><span class="v muted">${(f.size / 1024).toFixed(0)}K</span></div>`).join('')
+    toast(`目录里找到 ${j.count} 个可判定文件（显示前 40）`)
+  } catch (e) {
+    toast('取文件失败：' + e.message, 'err')
+  }
+}
+
+async function scanStart() {
+  if (SCAN.running) return toast('上一轮还在跑', 'warn')
+  const dir = $('scanDir').value.trim()
+  const lensKey = $('scanQ').value
+  const lens = (INFO.lenses || []).find((l) => l.key === lensKey) || (INFO.lenses || [])[0]
+  const spec = lens.type === 'noul' ? { type: 'noul', instructions: lens.instructions }
+    : { type: lens.type, instructions: lens.instructions, criteria: lens.criteria }
+  const maxFiles = Math.max(1, Math.min(400, Number($('scanMax').value) || 24))
+
+  SCAN = { rows: [], total: 0, done: 0, running: true, question: { key: lens.key, spec, label: lens.label } }
+  ANSWER = null
+  SELECTED = null
+  $('scanRows').innerHTML = ''
+  $('scanProg').textContent = '启动中…'
+  $('flowTitle').textContent = '批量光路 · ' + lens.label
+  renderFlow(); renderVerdicts(); renderDist()
+
+  let j
+  try {
+    const r = await fetch('/api/scan', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ dir, maxFiles, question: { key: lens.key, spec }, maxTokens: 3000 }),
+    })
+    j = await r.json()
+  } catch (e) {
+    SCAN.running = false
+    return toast('扫描启动失败：' + e.message, 'err')
+  }
+  if (!j.ok) { SCAN.running = false; return toast(j.error || '扫描启动失败', 'err') }
+  SCAN.total = j.total
+  $('scanProg').textContent = `0 / ${j.total}` + (j.simulated ? ' · SIMULATED' : '')
+
+  const es = new EventSource(`/api/scan/${j.id}/stream`)
+  es.addEventListener('answer', (ev) => {
+    const row = JSON.parse(ev.data)
+    SCAN.rows.push(row)
+    SCAN.done = SCAN.rows.length
+    SCAN.rows.sort((a, b) => answerNorm(b.answer) - answerNorm(a.answer))
+    renderFlow()
+    renderScanRows()
+    setFlowProgress(SCAN.done, SCAN.total, `${SCAN.done} / ${SCAN.total} 文件已判定`)
+    $('scanBar').style.width = ((SCAN.done / SCAN.total) * 100).toFixed(1) + '%'
+    $('scanProg').textContent = `${SCAN.done} / ${SCAN.total}` + (row.simulated ? ' · SIMULATED' : '')
+  })
+  es.addEventListener('progress', (ev) => {
+    const p = JSON.parse(ev.data)
+    $('scanBar').style.width = ((p.done / Math.max(1, p.total)) * 100).toFixed(1) + '%'
+    if (p.stats) paintStats(p.stats)
+  })
+  es.addEventListener('error', (ev) => {
+    try { toast('一个文件判定失败：' + JSON.parse(ev.data).rel, 'err') } catch { /* 连接级错误 */ }
+  })
+  es.addEventListener('done', (ev) => {
+    const d = JSON.parse(ev.data)
+    SCAN.running = false
+    es.close()
+    $('scanProg').textContent = `完成 ${d.done}/${d.total}${d.errors ? ' · 失败 ' + d.errors : ''} · ${(d.ms / 1000).toFixed(1)}s`
+    setFlowProgress(d.done, d.total, `${d.total} 个文件 · ${(d.ms / 1000).toFixed(1)}s`)
+    if (d.stats) paintStats(d.stats)
+    toast(`扫描完成：${d.total} 个文件，${d.errors} 个失败`, d.errors ? 'warn' : null)
+  })
+  es.onerror = () => {
+    if (SCAN.running) { SCAN.running = false; toast('SSE 断了，扫描可能已中断', 'err') }
+  }
+}
+
+function renderScanRows() {
+  const max = Math.max(0.0001, ...SCAN.rows.map((r) => answerNorm(r.answer)))
+  $('scanRows').innerHTML = SCAN.rows.map((r) => {
+    const col = answerColor(r.answer)
+    const pct = (answerNorm(r.answer) * 100).toFixed(0)
+    return `<div class="scanrow"><span class="f" title="${esc(r.rel)}">${esc(clip(r.rel, 40))}</span>
+      <span class="v" style="color:${col.stroke}">${esc(clip(answerMain(r.answer), 12))}</span>
+      <span class="b" style="grid-column:1/3;height:3px;background:#010409;border:1px solid #0b1620;display:block">
+        <i style="display:block;height:100%;width:${((answerNorm(r.answer) / max) * 100).toFixed(1)}%;background:${col.stroke};box-shadow:0 0 6px ${col.stroke}88"></i></span></div>`
+  }).join('')
+}
+
+/* ───────── 统计 / 信息 ───────── */
+function paintStats(s) {
+  $('c-stats').innerHTML = '请求 <b>' + s.requests + '</b>'
+  $('c-tokens').innerHTML = 'Token <b>' + fmtTok(s.inputTokens + s.outputTokens) + '</b>'
+  $('c-cost').innerHTML = '成本 <b>' + fmtUsd(s.costUsd) + '</b>'
+  $('c-p50').innerHTML = 'p50 <b>' + (s.p50 ? s.p50 + 'ms' : '—') + '</b>'
+}
+async function refreshStats() {
+  try {
+    paintStats(await (await fetch('/api/stats')).json())
+  } catch { /* ignore */ }
+}
+
+function renderInfo() {
+  const real = INFO.configured && !INFO.mock
+  const m = $('mode')
+  m.className = 'mode ' + (real ? 'real' : 'mock')
+  m.querySelector('span').textContent = real ? '真实 API' : 'SIMULATED（本地模拟）'
+  $('c-model').innerHTML = '模型 <b>' + esc(INFO.model) + '</b>'
+  $('c-key').innerHTML = 'Key <b>' + (real ? esc(INFO.keyMasked || '已配置') : '未配置') + '</b>'
+  $('c-key').title = real ? ('来源：' + INFO.keySource) : ('没有 TYPESAFE_API_KEY。取值顺序：环境变量 → ~/.config/typesafe/env；也可 TYPESAFE_API_KEY=... 重启本服务')
+  // 透镜
+  $('lensBox').innerHTML = (INFO.lenses || []).map((l) =>
+    `<button data-k="${esc(l.key)}"><span>${esc(l.label || l.key)}</span><span class="t">${esc(l.type)}</span></button>`).join('') 
+  const DEFAULT_ON = ['role', 'blast_radius', 'complexity', 'security']
+  for (const b of document.querySelectorAll('#lensBox button')) {
+    if (DEFAULT_ON.includes(b.dataset.k)) b.classList.add('on')
+    b.addEventListener('click', () => { b.classList.toggle('on'); $('lens-tag').textContent = document.querySelectorAll('#lensBox button.on').length + ' 个' })
+  }
+  $('lens-tag').textContent = document.querySelectorAll('#lensBox button.on').length + ' 个'
+  $('scanQ').innerHTML = (INFO.lenses || []).map((l) => `<option value="${esc(l.key)}"${l.key === 'start_here' ? ' selected' : ''}>${esc(l.label || l.key)} (${esc(l.type)})</option>`).join('')
+  if (!real) toast('没有 TYPESAFE_API_KEY：当前用**本地模拟判定器**，结果结构与真 API 一致，便于先看效果', 'warn')
+}
+
+/* ───────── 主流程 ───────── */
+async function boot() {
+  try {
+    INFO = await (await fetch('/api/info')).json()
+  } catch (e) {
+    return toast('连不上本地服务（bridge/jev-hud.mjs 起了吗？）', 'err')
+  }
+  renderInfo()
+  refreshStats()
+  $('sampleBtn').addEventListener('click', () => {
+    $('state').value = '客户工单 #48213：\n"上周买的 43 码跑鞋穿着夹脚，想换成 44 码，另外我第三次问退货流程了，前两次都没人回我。订单 2026-10-02 下的，已经拆封试穿过。"\n\n内部备注：该客户近 30 天有 3 次工单，上次因物流延迟获赔 20 元券。'
+    updateStateNote()
+    toast('已载入示例（工单分类场景）')
+  })
+  $('clearBtn').addEventListener('click', () => { $('state').value = ''; updateStateNote() })
+  $('fileBtn').addEventListener('click', async () => {
+    const p = $('filePath').value.trim()
+    if (!p) return toast('先填文件绝对路径', 'err')
+    $('fileBtn').disabled = true
+    try {
+      const r = await fetch('/api/file?path=' + encodeURIComponent(p))
+      const j = await r.json()
+      if (!j.ok) { toast(j.error || '读取失败', 'err'); return }
+      $('state').value = j.content
+      updateStateNote()
+      toast('已读入 ' + j.file.split('/').pop() + '（' + (j.size / 1024).toFixed(1) + 'KB）')
+    } catch (e) {
+      toast('读取失败：' + e.message, 'err')
+    } finally {
+      $('fileBtn').disabled = false
+    }
+  })
+  $('runBtn').addEventListener('click', run)
+  $('reqBtn').addEventListener('click', () => {
+    QUESTIONS = buildQuestions()
+    $('reqJson').textContent = requestPreview()
+    $('reqDetails').open = true
+    toast('请求 JSON 已刷新（key 是占位符）')
+  })
+  $('scanBtn').addEventListener('click', scanStart)
+  $('scanListBtn').addEventListener('click', scanList)
+  $('state').addEventListener('input', updateStateNote)
+  updateStateNote()
+}
+
+function updateStateNote() {
+  const s = $('state').value
+  $('state-tag').textContent = s.length + ' 字符 ≈ ' + Math.round(s.length / 4) + ' tok'
+  $('state-note').textContent = s.trim().startsWith('{') || s.trim().startsWith('[')
+    ? '看起来是 JSON：会按结构化 state 发送（官方推荐给模型结构而不是大段散文）'
+    : '按纯文本发送。若想传结构化 state，直接粘合法 JSON 即可。'
+}
+
+setInterval(() => {
+  const d = new Date()
+  const p = (n) => String(n).padStart(2, '0')
+  $('clock').textContent = p(d.getHours()) + ':' + p(d.getMinutes()) + ':' + p(d.getSeconds())
+}, 1000)
+
+boot()
+</script>
+</body>
+</html>

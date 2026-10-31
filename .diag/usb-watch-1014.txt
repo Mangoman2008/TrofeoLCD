@@ -1,0 +1,100 @@
+19:02:49 label=  (416:5408) usbOpen=False sent=0 err=USB 打开/握手失败（详见 hilog: TrofeoLC frames=
+19:02:50    (416:5408)|usbOpen=False|sent=0|USB 打开/握手失败（详见 hilog: Trof
+19:02:53 label=  (416:5408) usbOpen=False sent=0 err=USB 打开/握手失败（详见 hilog: TrofeoLC frames=
+19:02:56 label=  (416:5408) usbOpen=False sent=0 err=USB 打开/握手失败（详见 hilog: TrofeoLC frames=
+19:03:00 label=  (416:5408) usbOpen=False sent=0 err=USB 打开/握手失败（详见 hilog: TrofeoLC frames=
+19:03:03 label=  (416:5408) usbOpen=False sent=0 err=USB 打开/握手失败（详见 hilog: TrofeoLC frames=
+19:03:06 label=  (416:5408) usbOpen=False sent=0 err=USB 打开/握手失败（详见 hilog: TrofeoLC frames=
+19:03:10 label=  (416:5408) usbOpen=False sent=0 err=USB 打开/握手失败（详见 hilog: TrofeoLC frames=
+19:03:13 label=USBDISPLAY (416:5408) usbOpen=False sent=0 err=USB 打开/握手失败（详见 hilog: TrofeoLC frames=
+19:03:14  USBDISPLAY (416:5408)|usbOpen=False|sent=0|USB 打开/握手失败（详见 hilog: Trof
+19:03:17 label=USBDISPLAY (416:5408) usbOpen=False sent=0 err=USB 打开/握手失败（详见 hilog: TrofeoLC frames=
+19:03:20 label=  (416:5408) usbOpen=False sent=0 err=USB 打开/握手失败（详见 hilog: TrofeoLC frames=
+19:03:19    (416:5408)|usbOpen=False|sent=0|USB 打开/握手失败（详见 hilog: Trof
+19:03:24    (416:5408)|usbOpen=False|sent=1|未发现 USB 屏幕（0416:5408）
+19:03:25 label=  (416:5408) usbOpen=False sent=1 err=未发现 USB 屏幕（0416:5408） frames=
+19:03:28 label=  (416:5408) usbOpen=False sent=1 err=未发现 USB 屏幕（0416:5408） frames=
+19:03:32 label=  (416:5408) usbOpen=False sent=1 err=未发现 USB 屏幕（0416:5408） frames=
+19:03:35 label=  (416:5408) usbOpen=False sent=1 err=未发现 USB 屏幕（0416:5408） frames=
+19:03:39 label=  (416:5408) usbOpen=False sent=1 err=未发现 USB 屏幕（0416:5408） frames=
+19:03:43 label=  (416:5408) usbOpen=False sent=1 err=未发现 USB 屏幕（0416:5408） frames=
+19:03:47 label=  (416:5408) usbOpen=False sent=1 err=未发现 USB 屏幕（0416:5408） frames=
+19:03:51 label=  (416:5408) usbOpen=False sent=1 err=未发现 USB 屏幕（0416:5408） frames=
+19:03:55 label=  (416:5408) usbOpen=False sent=1 err=未发现 USB 屏幕（0416:5408） frames=
+19:04:00 label=  (416:5408) usbOpen=False sent=1 err=未发现 USB 屏幕（0416:5408） frames=
+19:04:03 label=  (416:5408) usbOpen=False sent=1 err=未发现 USB 屏幕（0416:5408） frames=
+19:04:06  无响应
+19:04:07 无响应
+19:04:14 label=  (416:5408) usbOpen=False sent=1 err=USB 打开/握手失败（详见 hilog: TrofeoLC frames=
+19:04:17    (416:5408)|usbOpen=False|sent=1|USB 打开/握手失败（详见 hilog: Trof
+19:04:19 label=  (416:5408) usbOpen=False sent=1 err=USB 打开/握手失败（详见 hilog: TrofeoLC frames=
+19:04:23  无响应
+19:04:24 无响应
+19:04:31 label=USBDISPLAY (416:5408) usbOpen=False sent=1 err=USB 打开/握手失败（详见 hilog: TrofeoLC frames=
+19:04:36 label=USBDISPLAY (416:5408) usbOpen=False sent=1 err=推送卡住，已自动重连 frames=
+19:04:38  USBDISPLAY (416:5408)|usbOpen=True|sent=1|
+19:04:41 label=USBDISPLAY (416:5408) usbOpen=True sent=1 err= frames=
+19:04:45 label=USBDISPLAY (416:5408) usbOpen=False sent=1 err=未发现 USB 屏幕（0416:5408） frames=
+19:04:45  USBDISPLAY (416:5408)|usbOpen=False|sent=1|未发现 USB 屏幕（0416:5408）
+19:04:49 label=USBDISPLAY (416:5408) usbOpen=False sent=1 err=未发现 USB 屏幕（0416:5408） frames=
+19:04:54 label=USBDISPLAY (416:5408) usbOpen=False sent=1 err=未发现 USB 屏幕（0416:5408） frames=
+19:04:59 label=USBDISPLAY (416:5408) usbOpen=False sent=1 err=未发现 USB 屏幕（0416:5408） frames=
+19:05:04 label=USBDISPLAY (416:5408) usbOpen=False sent=1 err=USB 打开/握手失败（详见 hilog: TrofeoLC frames=
+19:05:03  USBDISPLAY (416:5408)|usbOpen=False|sent=1|USB 打开/握手失败（详见 hilog: Trof
+19:05:08  无响应
+19:05:09 label=USBDISPLAY (416:5408) usbOpen=False sent=1 err=USB 打开/握手失败（详见 hilog: TrofeoLC frames=
+19:05:14  USBDISPLAY (416:5408)|usbOpen=False|sent=1|USB 打开/握手失败（详见 hilog: Trof
+19:05:16 label=USBDISPLAY (416:5408) usbOpen=False sent=1 err=USB 打开/握手失败（详见 hilog: TrofeoLC frames=
+19:05:17  无响应
+19:05:20 无响应
+19:05:27 无响应
+19:05:33  USBDISPLAY (416:5408)|usbOpen=False|sent=1|USB 打开/握手失败（详见 hilog: Trof
+19:05:35 label=USBDISPLAY (416:5408) usbOpen=False sent=1 err=USB 打开/握手失败（详见 hilog: TrofeoLC frames=
+19:05:39    (416:5408)|usbOpen=False|sent=1|USB 打开/握手失败（详见 hilog: Trof
+19:05:40 label=  (416:5408) usbOpen=False sent=1 err=USB 打开/握手失败（详见 hilog: TrofeoLC frames=
+19:05:44 label=  (416:5408) usbOpen=False sent=1 err=USB 打开/握手失败（详见 hilog: TrofeoLC frames=
+19:05:45    (416:5408)|usbOpen=False|sent=1|未发现 USB 屏幕（0416:5408）
+19:05:48 label=  (416:5408) usbOpen=False sent=1 err=未发现 USB 屏幕（0416:5408） frames=
+19:05:51 label=  (416:5408) usbOpen=False sent=1 err=未发现 USB 屏幕（0416:5408） frames=
+19:05:55 label=USBDISPLAY (416:5408) usbOpen=False sent=1 err=USB 接口被系统占用（claimInterface=-1） frames=
+19:05:56  USBDISPLAY (416:5408)|usbOpen=False|sent=1|USB 接口被系统占用（claimInterface
+19:05:59 label=USBDISPLAY (416:5408) usbOpen=False sent=1 err=USB 接口被系统占用（claimInterface=-1） frames=
+19:06:03 label=USBDISPLAY (416:5408) usbOpen=False sent=1 err=USB 接口被系统占用（claimInterface=-1） frames=
+19:06:07 label=USBDISPLAY (416:5408) usbOpen=False sent=1 err=USB 接口被系统占用（claimInterface=-1） frames=
+19:06:11 label=USBDISPLAY (416:5408) usbOpen=False sent=1 err=USB 接口被系统占用（claimInterface=-1） frames=
+19:06:14 label=USBDISPLAY (416:5408) usbOpen=False sent=1 err=USB 接口被系统占用（claimInterface=-1） frames=
+19:06:18 label=USBDISPLAY (416:5408) usbOpen=False sent=1 err=USB 接口被系统占用（claimInterface=-1） frames=
+19:06:22 label=USBDISPLAY (416:5408) usbOpen=False sent=1 err=USB 接口被系统占用（claimInterface=-1） frames=
+19:06:25 label=USBDISPLAY (416:5408) usbOpen=False sent=1 err=USB 接口被系统占用（claimInterface=-1） frames=
+19:06:29 label=USBDISPLAY (416:5408) usbOpen=False sent=1 err=USB 接口被系统占用（claimInterface=-1） frames=
+19:06:32 label=USBDISPLAY (416:5408) usbOpen=False sent=1 err=USB 接口被系统占用（claimInterface=-1） frames=
+19:06:36 无响应
+19:06:37  无响应
+19:06:39 无响应
+19:06:41  USBDISPLAY (416:5408)|usbOpen=False|sent=0|USB 接口被系统占用（claimInterface
+19:06:42 label=USBDISPLAY (416:5408) usbOpen=False sent=0 err=USB 接口被系统占用（claimInterface=-1） frames=
+19:06:46 label=USBDISPLAY (416:5408) usbOpen=False sent=0 err=USB 接口被系统占用（claimInterface=-1） frames=
+19:06:49 label=USBDISPLAY (416:5408) usbOpen=False sent=0 err=USB 接口被系统占用（claimInterface=-1） frames=
+19:06:53 label=USBDISPLAY (416:5408) usbOpen=False sent=0 err=USB 接口被系统占用（claimInterface=-1） frames=
+19:06:56 label=USBDISPLAY (416:5408) usbOpen=False sent=0 err=未发现 USB 屏幕（0416:5408） frames=
+19:06:56  USBDISPLAY (416:5408)|usbOpen=False|sent=0|未发现 USB 屏幕（0416:5408）
+19:07:00 label=USBDISPLAY (416:5408) usbOpen=False sent=0 err=未发现 USB 屏幕（0416:5408） frames=
+19:07:03 label=USBDISPLAY (416:5408) usbOpen=False sent=0 err=未发现 USB 屏幕（0416:5408） frames=
+19:07:09 label=USBDISPLAY (416:5408) usbOpen=False sent=0 err=未发现 USB 屏幕（0416:5408） frames=
+19:07:14 label=USBDISPLAY (416:5408) usbOpen=False sent=0 err=未发现 USB 屏幕（0416:5408） frames=
+19:07:18 label=USBDISPLAY (416:5408) usbOpen=False sent=0 err=未发现 USB 屏幕（0416:5408） frames=
+19:07:22 label=USBDISPLAY (416:5408) usbOpen=False sent=0 err=未发现 USB 屏幕（0416:5408） frames=
+19:07:25 label=USBDISPLAY (416:5408) usbOpen=False sent=0 err=未发现 USB 屏幕（0416:5408） frames=
+19:07:29 label=USBDISPLAY (416:5408) usbOpen=False sent=0 err=未发现 USB 屏幕（0416:5408） frames=
+19:07:33 label=USBDISPLAY (416:5408) usbOpen=False sent=0 err=未发现 USB 屏幕（0416:5408） frames=
+19:07:39 label=USBDISPLAY (416:5408) usbOpen=False sent=0 err=未发现 USB 屏幕（0416:5408） frames=
+19:07:43 label=USBDISPLAY (416:5408) usbOpen=False sent=0 err=未发现 USB 屏幕（0416:5408） frames=
+19:07:46 label=USBDISPLAY (416:5408) usbOpen=False sent=0 err=未发现 USB 屏幕（0416:5408） frames=
+19:07:50 label=USBDISPLAY (416:5408) usbOpen=False sent=0 err=未发现 USB 屏幕（0416:5408） frames=
+19:07:54 label=USBDISPLAY (416:5408) usbOpen=False sent=0 err=未发现 USB 屏幕（0416:5408） frames=
+19:07:58 label=USBDISPLAY (416:5408) usbOpen=False sent=0 err=未发现 USB 屏幕（0416:5408） frames=
+19:08:05 label=USBDISPLAY (416:5408) usbOpen=False sent=0 err=未发现 USB 屏幕（0416:5408） frames=
+19:08:10 label=USBDISPLAY (416:5408) usbOpen=False sent=0 err=未发现 USB 屏幕（0416:5408） frames=
+19:08:14 label=USBDISPLAY (416:5408) usbOpen=False sent=0 err=未发现 USB 屏幕（0416:5408） frames=
+19:09:07  无响应
+19:10:43 监视结束

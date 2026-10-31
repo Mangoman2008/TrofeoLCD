@@ -1,0 +1,4 @@
+[jev] JEV 决策光路: http://127.0.0.1:54551/
+[jev] 模式：**本地模拟**（没有 TYPESAFE_API_KEY；页面会标 SIMULATED）
+[jev] 限流：18 req/s，并发 4
+[jev] 退出

@@ -1,0 +1,4 @@
+# TrofeoLCD 进程内数据桥：随 DSH 启动，替代原来外部的 node 脚本
+- insert:
+    - id: dsh-lcd-bridge
+      name: dsh-lcd-bridge

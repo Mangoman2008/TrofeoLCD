@@ -1,0 +1,13 @@
+/oh_modules
+**/build
+/.hvigor
+.cxx
+/.clangd
+/.clang-format
+/.clang-tidy
+**/.test
+/.appanalyzer
+/.bitfun/.verify
+/.build-output
+/bridge/.bridge.pid
+/bridge/.bridge.log

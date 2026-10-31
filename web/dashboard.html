@@ -1,0 +1,1460 @@
+<!DOCTYPE html>
+<!--
+  dashboard.html —— TrofeoLCD 副屏 dashboard 的**网页版**（1:1 按屏的 1920×462 绘制）
+
+  用途（两步走里的第一步）：
+    ① 先在浏览器里 1:1 看版式（这个页面）；确认后再
+    ② （暂缓）要上屏时，再由一个 Pillow 镜像渲染器按同一套版面输出 JPEG，
+       走"预烘焙序列"通道送进屏（机制见 docs/预烘焙序列.md）。当前只做 ①。
+
+  为什么要有网页版这一层：
+    · 屏是 1920×462 的物理副屏，改版式时没法快速试错（要推帧才看得到）
+    · 浏览器里 100% 缩放 = 屏上一像素，改完立刻能确认；文字渲染比 Pillow 精细，适合定稿
+    · 定稿后 Pillow 镜像负责"能送进屏"的那一份（Pillow 没有浏览器，但快、零依赖）
+
+  数据：console-server /api/state（会话/时间线/待办/用量/系统/副屏）
+        jev-hud /api/ask（JEV 对"当前这一步"的判定；无 key 时为本地模拟并标 SIMULATED）
+-->
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<title>TrofeoLCD Dashboard · 1920×462 版式</title>
+<style>
+  :root{
+    --bg:#03070C; --line:#16324a; --line2:#0b1a26; --line3:#22506f;
+    --text:#d7ecfb; --dim:#7f9db4; --dim2:#517089;
+    --fiber:#39d0ff; --fiber2:#a06bff; --yes:#ff6fd8; --no:#39a8ff; --unsure:#8a97a3;
+    --green:#5ef2a0; --amber:#ffc247; --red:#ff5f56;
+    --mono:ui-monospace,SFMono-Regular,"JetBrains Mono",Menlo,Consolas,monospace;
+  }
+  *{box-sizing:border-box}
+  body{margin:0;background:#05080d;color:var(--text);font:13px/1.4 -apple-system,"HarmonyOS Sans SC","Noto Sans CJK SC",system-ui,sans-serif;
+    display:flex;flex-direction:column;align-items:center;gap:12px;padding:16px}
+  .bar{width:1920px;max-width:98vw;display:flex;align-items:center;gap:10px;flex-wrap:wrap;
+    border:1px solid var(--line);border-radius:3px;padding:7px 11px;background:#070d14}
+  .bar b{color:#eaf7ff;letter-spacing:1.4px;font-size:13px}
+  .bar .sp{flex:1}
+  .tag{font-family:var(--mono);font-size:11px;color:var(--dim);border:1px solid var(--line2);border-radius:2px;padding:1px 7px}
+  button{font:inherit;font-size:12px;color:var(--dim);background:#050b12;border:1px solid var(--line);border-radius:2px;padding:4px 10px;cursor:pointer}
+  button:hover{color:#eaf7ff;border-color:var(--fiber)}
+  button.on{color:#04140c;background:linear-gradient(180deg,var(--green),#2fd07f);border-color:var(--green)}
+  input{font:inherit;font-size:12px;color:var(--text);background:#02060b;border:1px solid var(--line);border-radius:2px;padding:4px 7px}
+
+  /* ── 就是屏：1920×462，1 CSS 像素 = 屏上 1 像素 ── */
+  .frameWrap{position:relative;width:1920px;max-width:98vw}
+  /* 画布 1920×1080：不再按副屏的 462 高挤，四栏各自的纵向空间都放开了 */
+  .screen{position:relative;width:1920px;height:1080px;transform-origin:top left;background:var(--bg);overflow:hidden;
+    border:1px solid var(--line3);
+    background-image:
+      linear-gradient(#0a1a26 1px,transparent 1px),linear-gradient(90deg,#0a1a26 1px,transparent 1px),
+      radial-gradient(700px 240px at 8% -20%,#0a2c40 0%,transparent 62%),
+      radial-gradient(700px 260px at 96% 0%,#1b1138 0%,transparent 58%);
+    background-size:100% 26px,26px 100%,auto,auto;
+    box-shadow:0 0 60px #39d0ff22 inset}
+
+  /* 顶栏 42px */
+  .top{position:absolute;left:0;top:0;width:1920px;height:46px;border-bottom:1px solid var(--line);
+    display:flex;align-items:flex-end;gap:12px;padding:0 14px 6px;background:linear-gradient(180deg,#08131dcc,#040a1188)}
+  .top .brand{letter-spacing:2.4px;font-size:15px;color:#eaf7ff;font-weight:600;text-shadow:0 0 10px #39d0ff88}
+  .top .sub{font-family:var(--mono);font-size:10px;color:var(--dim2);letter-spacing:.6px}
+  .top .pill{display:flex;align-items:center;gap:6px;border:1px solid var(--line);border-radius:2px;padding:2px 9px;font-size:11.5px;color:var(--dim);font-family:var(--mono)}
+  .top .pill b{color:#9fe6ff;font-weight:500}
+  .top .state{display:flex;align-items:center;gap:7px;border:1px solid;border-radius:2px;padding:2px 11px;font-size:12px;font-weight:600}
+  .top .state .d{width:7px;height:7px;border-radius:50%}
+  .top .state.busy{color:var(--amber);border-color:#5c4410;background:#1a1305}
+  .top .state.busy .d{background:var(--amber);box-shadow:0 0 8px var(--amber)}
+  .top .state.waiting{color:var(--green);border-color:#14513a;background:#04170f}
+  .top .state.waiting .d{background:var(--green);box-shadow:0 0 8px var(--green)}
+  .top .state.idle{color:var(--dim);border-color:var(--line);background:#050b12}
+  .top .state.idle .d{background:var(--dim2)}
+  .top .state.error{color:#ff9c94;border-color:#5c1c18;background:#1c0806}
+  .top .state.error .d{background:var(--red);box-shadow:0 0 8px var(--red)}
+  .top .clock{margin-left:auto;font-family:var(--mono);font-size:17px;color:#a9e9ff;letter-spacing:1px}
+
+  /* 四列（1920 = 300 + 780 + 420 + 420，全用 1px 竖线分隔） */
+  .cols{position:absolute;left:0;top:46px;width:1920px;height:1034px;display:grid;
+    /* 三栏：本机 / 会话（加宽 → 时间线更长）/ 右列（上=用量·副屏，下=JEV 决策，贴右下角） */
+    grid-template-columns:300px 1200px 420px}
+  .z{position:relative;padding:12px 16px 14px;border-right:1px solid var(--line2);overflow:hidden;
+    display:flex;flex-direction:column}
+  .rightCol{gap:10px}
+  .stack{display:flex;flex-direction:column;flex:none}
+  /* JEV 决策面板：贴这一栏最底（= 整页右下角），自带边框，和上面的用量区分开 */
+  .jevPanel{margin-top:auto;display:flex;flex-direction:column;min-height:500px;
+    border:1px solid var(--line);border-top:1px solid var(--fiber);border-radius:3px;
+    padding:10px 12px 12px;background:linear-gradient(180deg,#04101acc,#02060bcc)}
+  .z:last-child{border-right:0}
+  .z h2{margin:0 0 7px;padding-bottom:5px;font-size:11.5px;font-weight:600;letter-spacing:1.3px;color:#cfe8f8;
+    border-bottom:1px solid var(--line2);display:flex;align-items:center;gap:7px}
+  .z h2 .r{margin-left:auto;font-family:var(--mono);font-size:10px;color:var(--dim2);font-weight:400;letter-spacing:.3px}
+  .k{color:var(--dim2);font-size:10.5px}
+  .v{font-family:var(--mono);color:#eaf7ff}
+  .row{display:flex;align-items:baseline;gap:6px;margin:3px 0;font-size:12px}
+  .row .lbl{color:var(--dim);min-width:56px;font-size:11px}
+  .row .val{font-family:var(--mono);color:#eaf7ff;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+  .big{font-family:var(--mono);font-size:21px;color:#eaf7ff;letter-spacing:.5px}
+  #a-activity{opacity:.72}   /* 与时间线同一层语义：都在雨的后面 */
+  .bar{height:6px;border:1px solid var(--line2);background:#010509;overflow:hidden;margin:4px 0 6px}
+  .bar>i{display:block;height:100%;background:linear-gradient(90deg,#0d6d8f,var(--fiber));box-shadow:0 0 8px #39d0ffaa;transition:width .4s}
+  .bar.ok>i{background:linear-gradient(90deg,#0f7a52,var(--green));box-shadow:0 0 8px #5ef2a0aa}
+  .bar.warn>i{background:linear-gradient(90deg,#8a6108,var(--amber))}
+  .bar.bad>i{background:linear-gradient(90deg,#8a1b16,var(--red))}
+
+  /* 时间线：竖直光纤 + 节点 */
+  /* ★ 底部对齐：容器只有 286px，装不下 15 行；内容若从顶部排，被裁掉的是**最新**的几步。
+     改成 flex-end 后，裁掉的是旧的，最新的步骤永远贴着底边看得见。 */
+  /* ★ 执行指令这层：半透明，让雨在前面的穿透感出来（用户要求"指令放在矩阵雨后面、半透明"） */
+  .tl{position:relative;margin-top:6px;padding-left:22px;flex:1;min-height:0;overflow:hidden;
+    display:flex;flex-direction:column;justify-content:flex-end;opacity:.58}
+  .tl::before{content:"";position:absolute;left:6px;top:0;bottom:0;width:2px;
+    background:linear-gradient(180deg,transparent,#1d5f7d 8%,#1d5f7d 92%,transparent)}
+  .ev{position:relative;display:grid;grid-template-columns:60px 104px 1fr auto;gap:9px;align-items:center;
+    font-size:12.5px;padding:5px 8px 5px 0;margin-bottom:4px;border-left:0;background:linear-gradient(90deg,#06101955,#04080c1a)}
+  .ev::before{content:"";position:absolute;left:-17px;top:50%;width:8px;height:8px;border-radius:50%;
+    background:#04080c;border:1.5px solid var(--line3);transform:translateY(-50%)}
+  .ev.tool::before{border-color:var(--fiber);box-shadow:0 0 7px #39d0ffaa}
+  .ev.user::before{border-color:var(--yes);box-shadow:0 0 7px #ff6fd8aa}
+  .ev.assistant::before{border-color:var(--green);box-shadow:0 0 7px #5ef2a0aa}
+  .ev.todo::before{border-color:var(--fiber2);box-shadow:0 0 7px #a06bffaa}
+  .ev.run{background:linear-gradient(90deg,#1a130599,#04080c33)}
+  .ev.run::before{border-color:var(--amber);background:var(--amber);box-shadow:0 0 10px var(--amber)}
+  .ev .t{font-family:var(--mono);color:var(--dim2);font-size:11.5px}
+  .ev .tag{font-family:var(--mono);font-size:10px;border:1px solid var(--line2);border-radius:1px;padding:0 5px;color:#9ecbff}
+  .ev .s{overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:#dcecf8}
+  .ev .m{font-family:var(--mono);font-size:11px;color:var(--dim2)}
+
+  .todo{display:flex;gap:7px;align-items:center;font-size:11.5px;padding:2px 0}
+  .todo .i{width:12px;text-align:center;font-size:10px;color:var(--dim2)}
+  .todo.done{color:var(--dim2);text-decoration:line-through}
+  .todo.done .i{color:var(--green)}
+  .todo.doing{color:#eaf7ff}
+  .todo.doing .i{color:var(--amber)}
+
+  /* JEV 判定卡 */
+  .jv{border:1px solid var(--line2);border-left:2px solid var(--fiber);border-radius:2px;padding:6px 8px;margin-bottom:6px;background:#02060b}
+  .jv.choice{border-left-color:var(--fiber)}
+  .jv.score{border-left-color:var(--fiber2)}
+  .jv.noul{border-left-color:var(--yes)}
+  .jv .h{display:flex;align-items:center;gap:7px;font-size:12px}
+  .jv .h .lab{color:#eaf7ff}
+  .jv .h .ty{font-family:var(--mono);font-size:9.5px;color:var(--dim2);border:1px solid var(--line2);padding:0 4px}
+  .jv .h .main{margin-left:auto;font-family:var(--mono);font-size:14px}
+  .jv .meta{font-size:10.5px;color:var(--dim2);margin-top:2px;font-family:var(--mono)}
+  .dist{display:flex;gap:3px;margin-top:4px;align-items:flex-end;height:16px}
+  .dist i{flex:1;min-width:3px;background:linear-gradient(180deg,var(--fiber),#0a3a4d);min-height:2px}
+  .dist i.hi{background:linear-gradient(180deg,var(--yes),#6b2b57)}
+  .sim{font-family:var(--mono);font-size:10px;color:var(--amber);border:1px solid #5c4410;background:#1a1305;border-radius:2px;padding:0 5px}
+  .hintbox{margin-top:8px;border:1px dashed var(--line2);border-radius:2px;padding:6px 8px;font-size:11px;color:var(--dim2)}
+
+  /* ══════════ 光纤可视化 ══════════
+     画法：每条"光纤"三层叠加 —— 暗护套（粗、低亮）+ 发光芯（中、带辉光滤镜）+ 流动光（细、dash 动画）。
+     所有速度统一由 .screen 上的 --dur 控制：agent 忙就快、空闲就慢（"光缆里有没有流量"一眼能看出来）。
+     光点用 offset-path 沿同一条路径走（Chromium/WebKit 都支持）。 */
+  .screen{--dur:3.2s}
+  .screen.busy{--dur:1.15s}
+  .screen.waiting{--dur:2.1s}
+  .screen.idle{--dur:5.4s}
+  .fiber{position:absolute;left:0;top:0;width:1920px;height:1080px;z-index:0;pointer-events:none}
+  .cols,.top{position:absolute;z-index:1}
+  .top{background:linear-gradient(180deg,#06101955,#040a1122)}
+  .z{background:transparent}
+  .card,.jv,.ev,.bar,.pill,.state,.big,.row,.tl{position:relative;z-index:2}
+  .fiber .jacket{fill:none;stroke:#0b2130;stroke-width:6;stroke-linecap:round}
+  .fiber .core{fill:none;stroke-width:2.2;stroke-linecap:round;filter:url(#fglow)}
+  .fiber .flow{fill:none;stroke:#eaf7ff;stroke-width:1.5;stroke-linecap:round;opacity:.9;
+    stroke-dasharray:8 24;animation:dashmove linear infinite;animation-duration:calc(var(--dur) / 1.7)}
+  .fiber .dot{fill:#ffffff;filter:url(#fdot);animation:travel linear infinite;offset-rotate:0deg}
+  .fiber .coupler{fill:#04121b;stroke-width:1.6;filter:url(#fglow)}
+  @keyframes dashmove{to{stroke-dashoffset:-32}}
+  @keyframes travel{from{offset-distance:0%}to{offset-distance:100%}}
+  /* 全屏扫过的一道柔光（光学感，不是装饰线） */
+  /* ══════════ 字符雨（黑客帝国）══════════
+     整屏那一层：canvas 铺满 1920×1080，放在**光纤之上、内容之下**（文字仍可读，雨在后面落）。
+     每帧不是清空画布，而是盖一层半透明底色 —— 拖尾就是这么来的（矩阵雨的关键）。
+     有真实步骤时（rainBurst），被派去的那一列会用该步骤的**真实字符**当头部往下送。 */
+  /* ★ 雨在**最前面**（z-index 4 > 内容层 1/2 > 光纤层 0）：字从指令上面落过去。
+     用 screen 混合模式，所以是"加法式"提亮，不会把下面的字糊掉（只是被雨穿过）。 */
+  .rain{position:absolute;left:0;top:0;width:1920px;height:1080px;z-index:4;pointer-events:none;
+    opacity:.6;mix-blend-mode:screen}
+  .rain.off,.todoRain.off{display:none}
+  /* 隐藏待办整块（工具栏「待办」按钮切换）：进度条、待办摘要、字符流 canvas、说明行一起收掉，
+     腾出来的高度全给执行指令时间线。 */
+  .screen.hidetodo #todo-bar,.screen.hidetodo #todo-note,
+  .screen.hidetodo .todoRain,.screen.hidetodo .todoCap{display:none}
+  /* 执行命令（时间线上一步步的指令/回复）也可整块隐藏：默认隐藏，工具栏「指令」按钮切换。
+     保留"当前在做 / 工具"那一行 —— 它只说明现在在干什么，不占地方。 */
+  .screen.hidetl .tl{display:none}
+  /* 执行命令也隐藏：把"正在做 / 工具 / 最后回复"整行收掉，并且**工具类光包不再带命令文字**
+     （光包本身照飞，只是标签为空）。工具栏「命令」按钮切换。 */
+  .screen.hidecmd #a-row{display:none}
+  .calmark{position:absolute;width:24px;height:24px;background:#ff00ff;z-index:99;pointer-events:none}
+
+
+
+  /* 待办字符流：嵌在"会话"栏里，宽度跟着栏走 */
+  .todoRain{display:block;width:100%;height:176px;margin:2px 0 4px;
+    border:1px solid var(--line2);border-radius:2px;background:#01050a;opacity:.95}
+  .todoCap{font-family:var(--mono);font-size:11px;color:var(--dim2);margin:0 0 6px;
+    overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+
+  .sweep{position:absolute;top:0;width:520px;height:1080px;z-index:3;pointer-events:none;
+    background:linear-gradient(90deg,transparent,#39d0ff00 10%,#39d0ff14 45%,#8b5cff12 60%,transparent);
+    animation:sweep 9s linear infinite;mix-blend-mode:screen}
+  @keyframes sweep{0%{transform:translateX(-560px)}100%{transform:translateX(1980px)}}
+
+  /* 时间线的那根竖直光纤：粗芯 + 下行光脉冲 + 事件珠子 */
+  .tl::before{content:"";position:absolute;left:5px;top:0;bottom:0;width:4px;border-radius:2px;
+    background:linear-gradient(180deg,transparent,#0d3b52 6%,#1a6c8c 50%,#0d3b52 94%,transparent);
+    box-shadow:0 0 10px #39d0ff55}
+  .tl::after{content:"";position:absolute;left:5px;top:0;bottom:0;width:4px;border-radius:2px;
+    background:repeating-linear-gradient(180deg,#bff0ff 0 12px,transparent 12px 52px);
+    animation:dashdown linear infinite;animation-duration:calc(var(--dur) / 1.3);opacity:.9;
+    filter:drop-shadow(0 0 4px #8fe8ff)}
+  @keyframes dashdown{to{background-position-y:52px}}
+  .tl .pulse{position:absolute;left:3.5px;width:7px;height:7px;border-radius:50%;background:#eaf7ff;
+    box-shadow:0 0 10px #8fe8ff,0 0 20px #39d0ff88;animation:drop linear infinite}
+  @keyframes drop{0%{top:-8px;opacity:0}10%{opacity:1}90%{opacity:1}100%{top:100%;opacity:0}}
+  .ev::before{box-shadow:0 0 6px currentColor}
+  .ev.tool::before{border-color:var(--fiber)}
+  .ev.run::before{animation:breathe2 1s ease-in-out infinite}
+  @keyframes breathe2{0%,100%{box-shadow:0 0 10px var(--amber)}50%{box-shadow:0 0 22px var(--amber)}}
+
+  /* ══════════ 黑洞：光纤的起点，也是"思考"的发生地 ══════════
+     解剖（从外到内）：引力透镜晕 → 吸积盘（两条错位椭圆）→ 事件视界（纯黑圆）
+     → 光子环（细亮圈）→ 极向喷流（上下两道淡光）。光包从视界边缘诞生。
+     动画：吸积盘自转 + 光包诞生时整个洞闪一下（.flash）。 */
+  .hole{transform-origin:960px 563px}
+  .hole .halo{fill:url(#holeGlow)}
+  .hole .horizon{fill:#000}
+  .hole .photon{fill:none;stroke:#f2fbff;stroke-width:1.7;filter:url(#fglow);opacity:.95}
+  /* ★ 放大 5 倍 / 加速 50 倍：原来 16s/26s/9s → 0.32s / 0.52s / 0.18s。
+     2026-10-15 用户要求"慢一半"，以下时长已 ×2（= 原速 25 倍）。再慢就继续 ×2 这几个数。 */
+  /* 俯视（正对吸积盘面）视角：盘是**整圈同心环**，不是侧面细椭圆。
+     自转靠 dash 相位移动体现，所以叠了 4 圈不同 dash/方向的环 + 一条多普勒亮弧。
+     速度 = 原速 50 倍（0.32s 一圈这种量级，肉眼是高速流光）。 */
+  .hole .disk{fill:none;stroke-linecap:round;transform-origin:960px 563px;animation:spin 0.64s linear infinite}
+  .hole .disk3{fill:none;stroke-linecap:round;transform-origin:960px 563px;animation:spin 1.44s linear infinite}
+  .hole .disk4{fill:none;stroke-linecap:round;transform-origin:960px 563px;animation:spin 2.4s linear infinite reverse}
+  .hole .beam{fill:none;stroke-linecap:round;filter:url(#fglow);opacity:.5;animation:beampulse 3.2s ease-in-out infinite}
+  @keyframes beampulse{0%,100%{opacity:.34}50%{opacity:.62}}
+  .hole .bloom{fill:url(#holeBloom)}
+  /* ══════════ 工具调用线程（从黑洞边缘伸出来的光纤）══════════
+     每条 = 护套 + 芯 + 一根沿线的流光 + 端点珠。生长动画用 pathLength="1" 归一化，
+     这样不用管路径多长，dashoffset 从 1 补到 0 就是"从黑洞里抽出来"。
+     正在执行的那条端点珠脉动；跑完的按工具类型上色，越旧越淡（按时间做透明度衰减）。 */
+  .thread .tj{fill:none;stroke:#0a1c28;stroke-width:4.5;stroke-linecap:round}
+  .thread .tc{fill:none;stroke-width:2;stroke-linecap:round;filter:url(#fglow);
+    stroke-dasharray:1;stroke-dashoffset:1;animation:threadGrow .55s ease-out forwards}
+  .thread .tf{fill:none;stroke:#eaf7ff;stroke-width:1.2;stroke-linecap:round;opacity:.75;
+    stroke-dasharray:5 16;animation:dashmove linear infinite;animation-duration:calc(var(--dur) / 1.6)}
+  .thread .tt{fill:#cfe6f7;font-family:var(--mono);font-size:10px;
+    paint-order:stroke;stroke:#03070c;stroke-width:3px;stroke-linejoin:round}
+  .thread .tip{stroke-width:1.4;fill:#04121b;filter:url(#fglow)}
+  .thread.running .tip{animation:breathe2 1s ease-in-out infinite}
+  .thread.running .tf{stroke:#fff3d0;opacity:.95}
+  @keyframes threadGrow{to{stroke-dashoffset:0}}
+
+  .hole .disk2{fill:none;stroke-linecap:round;transform-origin:960px 563px;animation:spin 1.04s linear infinite reverse}
+  .hole .hot{fill:none;stroke:#ffffff;stroke-width:3.4;stroke-linecap:round;opacity:.92;filter:url(#fglow);transform-origin:960px 563px;animation:spin 0.36s linear infinite}
+  .hole .jet{stroke-linecap:round;opacity:.5;animation:jet 0.168s ease-in-out infinite}
+  @keyframes spin{to{transform:rotate(360deg)}}
+  @keyframes jet{0%,100%{opacity:.28}50%{opacity:.62}}
+  .hole.flash{animation:holeflash .34s ease-out}
+  @keyframes holeflash{0%{filter:brightness(2.6) drop-shadow(0 0 12px #eaf7ff)}100%{filter:none}}
+
+  /* ══════════ 步骤光包：DSH 的每一步都是一个沿光纤飞过去的光包 ══════════
+     一个包 = 彗尾(尾迹) + 亮核 + 标签文字，沿各分区支线的路径飞过去；
+     落地时目标区闪一下（.arrive），并把这一步压进时间线。 */
+  /* ★ 必须锁 offset-rotate:0deg：offset-path 默认 auto 会让标签跟着路径转向，
+     光包落到分区的竖直段时文字会立起来甚至倒过来（截图里抓到的）。 */
+  .pkt{animation:travel linear forwards;pointer-events:none;offset-rotate:0deg}
+  .pkt .tail{fill:none;stroke:#eaf7ff;stroke-width:1.6;stroke-linecap:round;opacity:.5;filter:url(#fdot)}
+  .pkt .head{fill:#ffffff;filter:url(#fdot)}
+  .pkt{will-change:offset-distance}
+  .pkt .halo{fill:none;stroke-width:1;opacity:.9;filter:url(#fglow)}
+  .pkt text{font-family:var(--mono);font-size:10.5px;fill:#ffffff;opacity:.96;
+    paint-order:stroke;stroke:#03070c;stroke-width:3.2px;stroke-linejoin:round}
+  .pkt.tool .halo{stroke:var(--fiber)}
+  .pkt.assistant .halo{stroke:var(--green)}
+  .pkt.user .halo{stroke:var(--yes)}
+  .pkt.todo .halo{stroke:var(--fiber2)}
+  .pkt.turn .halo{stroke:#7f9db4}
+  .pkt.jev .halo{stroke:var(--fiber2)}
+  .pkt.usage .halo{stroke:#3ff0d8}
+  .z.arrive{animation:arrive .9s ease-out}
+  @keyframes arrive{0%{box-shadow:inset 0 0 0 1px #39d0ff00}25%{box-shadow:inset 0 0 42px #39d0ff33,inset 0 0 0 1px #39d0ffaa}100%{box-shadow:inset 0 0 0 1px #39d0ff00}}
+
+  /* ══════════ 发散光纤（JEV 区）：一根进来，散成 N 条，每条 = 一条判定 ══════════
+     颜色即语义：青=choice、紫=score、粉=P(yes)、蓝=P(no)、灰=约 0.5 拿不准。
+     平时是"待机"态（暗、光点停住），JEV 判定回来时整束点亮一次（.on），
+     读起来就是"判定沿着发散光纤分发下去"。 */
+  .jevfan{display:block;width:100%;height:186px;margin:2px 0 8px;overflow:visible}
+  .jevfan .j{fill:none;stroke:#0b2130;stroke-width:5;stroke-linecap:round}
+  .jevfan .c{fill:none;stroke-width:2;stroke-linecap:round;filter:url(#fglow)}
+  .jevfan .cx{fill:none;stroke-linecap:round;filter:url(#fglow);animation:none}
+  .jevfan .f{fill:none;stroke:#eaf7ff;stroke-width:1.3;stroke-linecap:round;opacity:.0;
+    stroke-dasharray:6 20;animation:dashmove linear infinite;animation-duration:calc(var(--dur) / 1.7);
+    animation-play-state:paused;transition:opacity .4s}
+  .jevfan .d{fill:#fff;filter:url(#fdot);opacity:.18;animation:travel linear infinite;offset-rotate:0deg;
+    animation-duration:calc(var(--dur) * 1.25);animation-play-state:paused;transition:opacity .4s}
+  .jevfan .cap{font-family:var(--mono);font-size:9.5px;fill:#7f9db4}
+  .jevfan .val{font-family:var(--mono);font-size:12px;font-weight:600;filter:url(#fglow)}
+  .jevfan .lbl{font-family:var(--mono);font-size:9.5px;fill:#cfe8f8}
+  .jevfan.on .f{opacity:.95;animation-play-state:running}
+  .jevfan.on .d{opacity:1;animation-play-state:running}
+  .jevfan .coupler{fill:#04121b;stroke-width:1.6;filter:url(#fglow)}
+  /* 判定卡压在半透明底上：发散光纤从卡背后穿过去，只在缝里露出来（而不是糊在文字上） */
+  .jv{background:#02060bcc;backdrop-filter:blur(.5px)}
+
+
+</style>
+</head>
+<body>
+<div class="bar">
+  <b>TrofeoLCD DASHBOARD · 网页版 1:1</b>
+  <span class="tag" id="t-scale">100%</span>
+  <span class="tag" id="t-data">数据 —</span>
+  <span class="sp"></span>
+  <button id="fit" class="on">适应窗口</button>
+  <button id="full">100%（1 像素 : 1 像素）</button>
+  <button id="jevBtn">JEV 判定一次</button>
+  <button id="rainBtn" class="on">字符雨</button>
+  <button id="todoBtn">待办</button>
+  <button id="tlBtn">指令</button>
+  <button id="cmdBtn">命令</button>
+  <span class="tag">网页版（当前只做这一版；要上屏再走预烘焙序列通道）</span>
+</div>
+
+<div class="frameWrap">
+  <div class="screen" id="screen">
+    <!-- 光纤层：内容都在它上面（z-index 1/2）。几何用固定常量，与分区线对齐 -->
+    <svg class="fiber" id="fiber" viewBox="0 0 1920 1080" preserveAspectRatio="none" aria-hidden="true">
+      <defs>
+        <filter id="fglow" x="-50%" y="-50%" width="200%" height="200%">
+          <feGaussianBlur stdDeviation="2.4" result="b"/>
+          <feMerge><feMergeNode in="b"/><feMergeNode in="SourceGraphic"/></feMerge>
+        </filter>
+        <radialGradient id="holeBloom" cx="50%" cy="50%" r="50%">
+          <stop offset="0%" stop-color="#f2fbff" stop-opacity="0.55"/>
+          <stop offset="45%" stop-color="#8fe8ff" stop-opacity="0.16"/>
+          <stop offset="100%" stop-color="#000" stop-opacity="0"/>
+        </radialGradient>
+        <radialGradient id="holeGlow" cx="50%" cy="50%" r="50%">
+          <stop offset="0%" stop-color="#000" stop-opacity="0"/>
+          <stop offset="52%" stop-color="#000" stop-opacity="0"/>
+          <stop offset="62%" stop-color="#39d0ff" stop-opacity="0.55"/>
+          <stop offset="74%" stop-color="#a06bff" stop-opacity="0.28"/>
+          <stop offset="100%" stop-color="#000" stop-opacity="0"/>
+        </radialGradient>
+        <linearGradient id="jetGrad" x1="0" y1="1" x2="0" y2="0">
+          <stop offset="0%" stop-color="#8fe8ff" stop-opacity="0.55"/>
+          <stop offset="100%" stop-color="#8fe8ff" stop-opacity="0"/>
+        </linearGradient>
+        <filter id="fdot" x="-300%" y="-300%" width="700%" height="700%">
+          <feGaussianBlur stdDeviation="2" result="b"/>
+          <feMerge><feMergeNode in="b"/><feMergeNode in="b"/><feMergeNode in="SourceGraphic"/></feMerge>
+        </filter>
+      </defs>
+      <g id="fiberNet"></g>
+      <!-- 工具调用线程分两层：束（按工具类型的量，变动少）与明细（最近 N 次，逐条增删） -->
+      <g id="toolBundles"></g>
+      <g id="toolDetail"></g>
+    </svg>
+    <div class="sweep"></div>
+    <!-- 字符雨（整屏）：有真实步骤时，那一列会把该步骤的文字当字符送下来 -->
+    <canvas class="rain" id="rain" width="1920" height="1080" aria-hidden="true"></canvas>
+    <!-- 顶栏 -->
+    <div class="top">
+      <span class="brand">AGENT DASHBOARD</span>
+      <span class="sub">1920×1080 · DeepSeek Harness · 自动刷新</span>
+      <span class="pill" id="p-project">项目 <b>—</b></span>
+      <span class="pill" id="p-title">会话 <b>—</b></span>
+      <span class="pill" id="p-model">模型 <b>—</b></span>
+      <span class="state idle" id="p-state"><i class="d"></i><span>连接中…</span></span>
+      <span class="pill" id="p-link">链路 <b>—</b></span>
+      <span class="pill" id="stepBadge">步骤 —</span>
+      <span class="clock" id="p-clock">--:--:--</span>
+    </div>
+
+    <div class="cols">
+      <!-- ① 本机 -->
+      <div class="z">
+        <h2>本机 <span class="r" id="sys-host"></span></h2>
+        <div class="row"><span class="lbl">CPU</span><span class="val big" id="sys-cpu">—</span></div>
+        <div class="bar" id="sys-cpu-bar"><i></i></div>
+        <div class="row"><span class="lbl">内存</span><span class="val" id="sys-mem">—</span></div>
+        <div class="bar" id="sys-mem-bar"><i></i></div>
+        <div class="row"><span class="lbl">负载</span><span class="val" id="sys-load">—</span></div>
+        <div class="row"><span class="lbl">开机</span><span class="val" id="sys-up">—</span></div>
+        <div class="row" style="margin-top:8px"><span class="lbl">会话轮次</span><span class="val" id="s-turns">—</span></div>
+        <div class="row"><span class="lbl">工具调用</span><span class="val" id="s-tools">—</span></div>
+        <div class="small muted" id="threadLegend" style="margin:-2px 0 4px;font-family:var(--mono);font-size:10.5px"></div>
+        <div class="row"><span class="lbl">活跃会话</span><span class="val" id="s-active">—</span></div>
+      </div>
+
+      <!-- ② 会话 + 时间线 -->
+      <div class="z">
+        <h2>DeepSeek Harness · 当前在做 <span class="r" id="a-turn"></span></h2>
+        <div class="row" id="a-row" style="margin:0 0 4px">
+          <span class="val" id="a-activity" style="font-size:14px">—</span>
+          <span class="lbl" style="margin-left:auto">工具</span><span class="val" id="a-tool">—</span>
+        </div>
+        <div class="bar" id="todo-bar" style="margin:5px 0 2px"><i></i></div>
+        <div class="row" style="margin:0 0 4px"><span class="k" id="todo-note">待办 —</span>
+          <span class="k" style="margin-left:auto" id="a-last"></span></div>
+        <!-- 待办字符流：待办的文字不再排成列表，而是每条一列字符往下滚（矩阵雨），
+             正在做的那列更亮、并周期性"解码"成可读文字；下面这行小字是保底的可读摘要。 -->
+        <canvas class="todoRain" id="todoRain" width="1168" height="176" aria-hidden="true"></canvas>
+        <div class="todoCap" id="todoCap">待办 —</div>
+        <div class="tl" id="tl"></div>
+      </div>
+
+      <!-- ③ 右列：上=用量/副屏，下=JEV 决策（**页面右下角**）-->
+      <div class="z rightCol" style="border-right:0">
+      <!-- ④ 用量 + 副屏 -->
+      <section class="stack">
+        <h2>用量 <span class="r" id="u-src"></span></h2>
+        <div class="row"><span class="lbl">今日输入</span><span class="val" id="u-in">0</span></div>
+        <div class="row"><span class="lbl">今日输出</span><span class="val" id="u-out">0</span></div>
+        <div class="row"><span class="lbl">今日合计</span><span class="val" id="u-total" style="font-size:15px">0</span></div>
+        <div class="row"><span class="lbl">上下文</span><span class="val" id="u-ctx">—</span></div>
+        <div class="bar" id="u-ctx-bar"><i></i></div>
+        <div class="row"><span class="lbl">本会话</span><span class="val" id="u-sess">—</span></div>
+
+        <h2 style="margin-top:10px">副屏 <span class="r" id="scr-tag">—</span></h2>
+        <div class="row"><span class="lbl">状态</span><span class="val" id="scr-state">—</span></div>
+        <div class="row"><span class="lbl">帧</span><span class="val" id="scr-frame">—</span></div>
+        <div class="row"><span class="lbl">主题</span><span class="val" id="scr-theme">—</span></div>
+        <div class="row"><span class="lbl">遥测</span><span class="val" id="scr-bridge">—</span></div>
+        <div class="row"><span class="lbl">余额</span><span class="val" id="scr-balance">—</span></div>
+        </section>
+
+        <!-- JEV 决策：margin-top:auto 把它压到这一栏的最底部，也就是整页右下角 -->
+        <section class="jevPanel" id="jevPanel">
+
+        <h2>JEV 决策 <span class="r" id="jev-mode">—</span></h2>
+        <!-- 发散光纤：一根光纤进 JEV 区，在这里散成 N 条，每条落到一条判定上
+             （N = 本次实际问了几条，几何由 drawJevFan() 按答案动态生成） -->
+        <svg class="jevfan" id="jevFan" viewBox="0 0 400 186" preserveAspectRatio="none" aria-hidden="true"></svg>
+        <div id="jevBox"></div>
+        <div class="hintbox" id="jevHint">JEV（TypeSafe System One）对当前这一步做带概率的判定：值不值得人工确认、风险等级、该不该继续。
+          没有 TYPESAFE_API_KEY 时用本地模拟（标 SIMULATED）；点上方「JEV 判定一次」手动触发。</div>
+        </section>
+      </div>
+    </div>
+  </div>
+</div>
+
+<script>
+const $ = (id) => document.getElementById(id)
+const esc = (s) => String(s ?? '').replace(/[&<>"']/g, (c) => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]))
+const fmtTok = (n) => { n = Number(n) || 0; return n >= 1e8 ? (n/1e8).toFixed(2)+'亿' : n >= 1e4 ? (n/1e4).toFixed(1)+'万' : String(n) }
+const clip = (s, n) => { s = String(s ?? ''); return s.length > n ? s.slice(0, n-1)+'…' : s }
+const hhmmss = (ts) => { if (!ts) return ''; const d = new Date(ts), p = (n)=>String(n).padStart(2,'0'); return p(d.getHours())+':'+p(d.getMinutes())+':'+p(d.getSeconds()) }
+const ago = (ms) => { ms = Number(ms)||0; if (ms < 60000) return Math.round(ms/1000)+'s'; if (ms < 3600000) return Math.round(ms/60000)+'m'; return (ms/3600000).toFixed(1)+'h' }
+
+/* 缩放：默认适应窗口（屏是 1920 宽，笔记本上放不下），可切 100% 逐像素核对 */
+function fit() {
+  const s = $('screen')
+  const scale = Math.min(1, (window.innerWidth - 44) / 1920, (window.innerHeight - 130) / 1080)
+  const on = $('fit').classList.contains('on')
+  const k = on ? scale : 1
+  s.style.transform = `scale(${k})`
+  document.querySelector('.frameWrap').style.height = (1080 * k) + 'px'
+  $('t-scale').textContent = Math.round(k * 100) + '%'
+}
+$('fit').addEventListener('click', () => { $('fit').classList.add('on'); $('full').classList.remove('on'); fit() })
+$('full').addEventListener('click', () => {
+  $('full').classList.add('on'); $('fit').classList.remove('on')
+  $('screen').style.transform = 'scale(1)'
+  document.querySelector('.frameWrap').style.height = '1080px'
+  $('t-scale').textContent = '100%'
+})
+window.addEventListener('resize', fit)
+
+/* ── 数据 ── */
+let SNAP = null
+let JEV = null
+
+const LENSES = [
+  { key: 'needs_human', type: 'noul', label: '值得人工确认', instructions: 'Should a human review the current agent step before it is trusted?' },
+  { key: 'risk', type: 'score', label: '风险等级', instructions: 'How risky is the action the agent is taking right now?', criteria: ['无害','轻微','需留意','较危险','危险'] },
+  { key: 'continue', type: 'noul', label: '可以继续', instructions: 'Is it safe for the agent to continue without more context?' },
+]
+
+function renderTop(s) {
+  const a = s.agent || {}, app = s.app || {}
+  $('p-project').innerHTML = '项目 <b>' + esc(a.project || '—') + '</b>'
+  $('p-title').innerHTML = '会话 <b>' + esc(clip(s.title || (s.session?.sid || '—'), 26)) + '</b>'
+  $('p-model').innerHTML = '模型 <b>' + esc(a.model || '—') + '</b>'
+  const st = $('p-state'), stt = a.errorText ? 'error' : (a.state || 'idle')
+  st.className = 'state ' + stt
+  st.querySelector('span').textContent = (stt === 'busy' ? '工作中' : stt === 'waiting' ? '等待输入' : stt === 'error' ? '出错' : '空闲')
+    + (a.activity && stt !== 'idle' ? ' · ' + a.activity : '')
+  const linkOk = app.online && app.usbOpen
+  $('p-link').innerHTML = '链路 <b>' + (linkOk ? 'USB ' + (app.fps || 0).toFixed(1) + 'fps · 遥测 ' + (app.bridgeAgeSec ?? '—') + 's' : (app.online ? '副屏在线/USB 未连' : '副屏离线')) + '</b>'
+}
+
+function renderSystem(s) {
+  const y = s.system || {}, app = s.app || {}
+  $('sys-host').textContent = y.host || ''
+  $('sys-cpu').textContent = (y.cpu ?? 0) + '%'
+  const cb = $('sys-cpu-bar'); cb.className = 'bar ' + (y.cpu > 85 ? 'bad' : y.cpu > 60 ? 'warn' : ''); cb.querySelector('i').style.width = (y.cpu || 0) + '%'
+  $('sys-mem').textContent = ((y.memUsed||0)/1024).toFixed(1) + ' / ' + ((y.memTotal||0)/1024).toFixed(0) + ' GB'
+  const mb = $('sys-mem-bar'), mp = y.memTotal ? (y.memUsed / y.memTotal) * 100 : 0
+  mb.className = 'bar ' + (mp > 90 ? 'bad' : mp > 75 ? 'warn' : ''); mb.querySelector('i').style.width = mp.toFixed(1) + '%'
+  $('sys-load').textContent = [y.load1, y.load5, y.load15].join(' / ')
+  $('sys-up').textContent = ago((y.uptimeSec || 0) * 1000)
+  const st = s.stats || {}
+  $('s-turns').textContent = (st.turns ?? '—') + (st.errors ? ' · 错 ' + st.errors : '')
+  $('s-tools').textContent = st.toolCounts ? Object.values(st.toolCounts).reduce((a,b)=>a+b,0) : '—'
+  $('s-active').textContent = (s.activeSessions ?? '—') + ' 个'
+}
+
+function renderAgent(s) {
+  const a = s.agent || {}, todos = s.todos || []
+  $('a-turn').textContent = 'turn ' + (a.turn ?? '-') + ' · step ' + (a.step ?? '-') + (s.session ? ' · ' + s.session.ageSec + 's 前有活动' : '')
+  const actNext = a.activity || '空闲'
+  if ($('a-activity').textContent !== actNext) scrambleText($('a-activity'), actNext)
+  $('a-tool').textContent = (a.runningTool ? '▶ ' : '') + (a.tool || '—')
+  $('a-tool').style.color = a.runningTool ? 'var(--amber)' : ''
+  const done = todos.filter((t) => t.status === 'completed').length
+  const pct = todos.length ? (done / todos.length) * 100 : 0
+  const tb = $('todo-bar'); tb.className = 'bar ' + (pct >= 100 && todos.length ? 'ok' : ''); tb.querySelector('i').style.width = pct + '%'
+  const doing = todos.find((t) => t.status === 'in_progress')
+  todoRainSync(todos)
+  $('todoCap').textContent = todos.length
+    ? ('字符流：' + todos.length + ' 条待办各占一列；' + (doing ? '正在做「' + clip(doing.content, 60) + '」' : '当前没有 in_progress'))
+    : '还没有待办（DSH 调 todo_write 后这里会出现字符流）'
+  $('todo-note').textContent = todos.length ? '待办 ' + done + '/' + todos.length + (doing ? ' · 正在做：' + clip(doing.content, 28) : '') : '还没有 todo'
+  $('a-last').textContent = clip((a.lastText || '').replace(/\s+/g, ' '), 46)
+
+  // 时间线：最近 9 条（新在下），正在跑的工具高亮
+  const rows = (s.timeline || []).filter((r) => ['user','assistant','tool','todo','turn'].includes(r.kind)).slice(-34)
+  $('tl').innerHTML = rows.map((r) => {
+    const running = r.kind === 'tool' && r.running
+    const cls = 'ev ' + r.kind + (running ? ' run' : '')
+    let tag = r.kind === 'tool' ? (r.tool || 'tool') : r.kind === 'user' ? '指令' : r.kind === 'assistant' ? '回复' : r.kind === 'todo' ? '待办' : '轮次'
+    let text = r.kind === 'tool' ? (r.brief || '')
+      : r.kind === 'assistant' ? clip((r.text || r.reasoning || '（无文本，直接调用工具）').replace(/\s+/g,' '), 76)
+      : r.kind === 'user' ? clip((r.text || '').replace(/\s+/g,' '), 76)
+      : r.kind === 'todo' ? (r.done + '/' + r.total + (r.current ? ' · ' + r.current : ''))
+      : ('turn ' + (r.turn ?? '') + ' ' + (r.phase === 'end' ? '结束' + (r.reason ? ' · ' + r.reason : '') : '开始'))
+    let meta = r.kind === 'tool' ? (running ? '执行中' : (r.result?.ms !== undefined ? r.result.ms + 'ms' : '')) : ''
+    return `<div class="${cls}"><span class="t">${hhmmss(r.ts)}</span><span class="tag">${esc(clip(tag,10))}</span>
+      <span class="s" title="${esc(text)}">${esc(clip(text, 76))}</span><span class="m">${esc(meta)}</span></div>`
+  }).join('') || '<div class="ev"><span class="t"></span><span class="tag">—</span><span class="s">还没有事件</span><span class="m"></span></div>'
+}
+
+function renderUsage(s) {
+  const t = s.tokens || {}, st = s.stats || {}
+  $('u-in').textContent = fmtTok(t.todayInput)
+  $('u-out').textContent = fmtTok(t.todayOutput)
+  $('u-total').textContent = fmtTok(t.todayTotal)
+  const used = t.contextUsed || 0, win = t.contextWindow || 1000000
+  $('u-ctx').textContent = fmtTok(used) + ' / ' + fmtTok(win) + '（' + ((used/win)*100).toFixed(1) + '%）'
+  const cb = $('u-ctx-bar'), p = (used/win)*100
+  cb.className = 'bar ' + (p > 85 ? 'bad' : p > 60 ? 'warn' : 'ok'); cb.querySelector('i').style.width = Math.min(100,p).toFixed(1) + '%'
+  $('u-sess').textContent = st.sessionUsage ? (fmtTok(st.sessionUsage.input + st.sessionUsage.output) + '（缓存读 ' + fmtTok(st.sessionUsage.cacheRead) + '）') : '—'
+  $('u-src').textContent = st.ageMs !== undefined ? '全量 ' + ago(st.ageMs) + ' 前' : '尾部窗口'
+}
+
+function renderScreen(s) {
+  const app = s.app || {}, lcd = s.lcd || {}
+  $('scr-tag').textContent = app.online ? ((app.jpegW||0) + '×' + (app.jpegH||0)) : '离线'
+  $('scr-state').textContent = app.online ? (app.usbOpen ? 'USB 已连接' : 'USB 未连') + (app.errors ? ' · 错 ' + app.errors : '') : '副屏不可达'
+  $('scr-frame').textContent = app.online ? ((app.fps||0).toFixed(1) + ' fps · ' + ((app.jpegBytes||0)/1024).toFixed(0) + 'KB/帧 · 已推 ' + (app.sent||0)) : (app.err || '—')
+  $('scr-theme').textContent = app.online ? (app.theme + ' 档 · ' + (app.vertical ? '竖屏' : '横屏') + (app.rotate180 ? ' · 旋转180' : '')) : '—'
+  $('scr-bridge').textContent = app.online ? ((app.bridgeSource || '—') + ' · ' + (app.bridgeAgeSec ?? '—') + 's 前') : (lcd.at ? '快照 ' + ago(Date.now() - Date.parse(lcd.at)) + ' 前' : '—')
+  $('scr-balance').textContent = lcd.balance ? (lcd.balance.currency + ' ' + Number(lcd.balance.total).toFixed(2)) : (lcd.printerState ? '打印机 ' + lcd.printerState : '—')
+}
+
+/* ── JEV 面板 ── */
+function renderJev(simulated, answers, meta) {
+  const box = $('jevBox')
+  $('jev-mode').innerHTML = meta || ''
+  if (!answers) {
+    box.innerHTML = '<div style="font-size:11.5px;color:var(--dim2)">还没有判定。点上方「JEV 判定一次」，或等自动刷新（20s）。</div>'
+    return
+  }
+  box.innerHTML = LENSES.map((l) => {
+    const a = answers[l.key]
+    if (!a) return ''
+    const conf = typeof a.confidence === 'number' ? a.confidence : null
+    let main, color, note
+    if (a.type === 'noul') {
+      main = a.noul.toFixed(2)
+      color = a.noul >= 0.62 ? 'var(--yes)' : a.noul <= 0.38 ? 'var(--no)' : 'var(--unsure)'
+      note = 'P(真) = ' + a.noul.toFixed(3) + (a.noul > 0.38 && a.noul < 0.62 ? ' · 接近 0.5：判不准' : '')
+    } else if (a.type === 'score') {
+      main = a.score.toFixed(2)
+      color = 'var(--fiber2)'
+      const lv = a.legend?.[String(Math.round(a.score))]
+      note = 'confidence ' + (conf ?? 0).toFixed(2) + (lv ? ' · ' + lv : '') + (conf !== null && conf < 0.5 ? ' · 偏低' : '')
+    } else {
+      main = a.choice
+      color = 'var(--fiber)'
+      note = 'confidence ' + (conf ?? 0).toFixed(2)
+    }
+    const probs = a.probabilities ? Object.values(a.probabilities) : []
+    const maxP = probs.length ? Math.max(...probs) : 0
+    const dist = probs.length ? '<div class="dist">' + probs.map((p) =>
+      `<i class="${p >= maxP - 1e-9 && p > 0.5 ? 'hi' : ''}" style="height:${Math.max(8, p*100)}%"></i>`).join('') + '</div>' : ''
+    return `<div class="jv ${esc(a.type)}">
+      <div class="h"><span class="lab">${esc(l.label)}</span><span class="ty">${esc(a.type)}</span>
+        <span class="main" style="color:${color}">${esc(clip(main, 12))}</span></div>
+      <div class="meta">${esc(note)}</div>${dist}</div>`
+  }).join('')
+  if (simulated) $('jev-mode').innerHTML += ' <span class="sim">SIMULATED</span>'
+  drawJevFan()
+}
+
+async function jevAsk() {
+  const s = SNAP
+  if (!s) return
+  const a = s.agent || {}
+  const state = {
+    project: a.project || '',
+    activity: a.activity || '',
+    tool: a.tool || '',
+    turn: a.turn, step: a.step,
+    last_message: (a.lastText || '').slice(0, 1200),
+    recent_events: (s.timeline || []).slice(-6).map((r) => ({ kind: r.kind, tool: r.tool, brief: clip(r.brief || r.text || '', 160), ms: r.result?.ms })),
+  }
+  const questions = {}
+  for (const l of LENSES) {
+    questions[l.key] = l.type === 'noul'
+      ? { type: 'noul', instructions: l.instructions + '\n\nState: `step`（JSON）' }
+      : { type: l.type, instructions: l.instructions + '\n\nState: `step`（JSON）', criteria: l.criteria }
+  }
+  try {
+    const r = await fetch('/jev/api/ask', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ state, questions }),
+    })
+    const j = await r.json()
+    if (!j.ok) { renderJev(false, null, '失败：' + (j.error || '')); return }
+    JEV = j
+    renderJev(!!j.simulated, j.data.answers || {}, (j.simulated ? '本地模拟' : (j.data.model || 'jev')) + ' · ' + j.latencyMs + 'ms')
+    const ans = j.data?.answers || {}
+    const bits = Object.entries(ans).map(([k, a]) => k + '=' + (a.type === 'choice' ? clip(a.choice, 10) : a.type === 'score' ? a.score : (a.noul ?? 0).toFixed(2)))
+    spawnInfoPacket('jev', 'JEV ' + bits.join('  '))
+  } catch (e) {
+    renderJev(false, null, 'JEV 服务不可达（tools/jev-hud.sh start）')
+  }
+}
+$('jevBtn').addEventListener('click', jevAsk)
+$('rainBtn').addEventListener('click', () => {
+  RAIN.on = !RAIN.on
+  $('rainBtn').classList.toggle('on', RAIN.on)
+  $('rain').classList.toggle('off', !RAIN.on)
+  $('todoRain').classList.toggle('off', !RAIN.on)
+  if (RAIN.on) { rainInit(); RAIN.last = 0 }
+})
+
+/* ───────── 光纤网络（几何用固定常量，与分区线 300/1080/1500 对齐） ─────────
+   为什么用 JS 生成而不是写死 SVG：股数/分光点数要跟着布局常量走，
+   写死一份 1920 的坐标很容易和 CSS 的分区宽度脱钩（改一次宽度就得手改几十个数）。 */
+const ZONE_X = [300, 1080, 1500]           // 分区线（grid-template-columns: 300 780 420 420 的累计）
+const TRUNK_Y = [7, 12, 17]                 // 顶栏上沿的背板总线：3 股（避开文字行）
+const TRUNK_C = ['#39d0ff', '#a06bff', '#3ff0d8', '#39a8ff', '#ff6fd8']
+const DROP_C = ['#39d0ff', '#a06bff', '#3ff0d8']
+/** 黑洞：页面正中，半径 140（= 原先 28 的 5 倍） */
+const HOLE = { x: 960, y: 563, r: 182 }   // 半径 182 = 140 × 1.3（用户要求放大到 130%）
+/** 四个分区的接入端口（光包的落点） */
+const PORTS = [150, 690, 1710]            // 三个分区顶部端口（本机 / 会话 / 用量）
+const JEV_PORT = { x: 1500, y: 604 }      // JEV 面板在右下角：缆从左侧喂进去
+const RADIAL_C = ['#3ff0d8', '#39d0ff', '#a06bff', '#ff6fd8']
+
+/**
+ * 辐射缆路径：从黑洞**边缘**出发，甩到分区端口（x, 96）。
+ * 先沿半径方向离场（像被黑洞抛出来），再抬升并从上方**垂直进入**端口 —— 这样
+ * 光包飞行的方向感和落点都和端口对齐，不会斜插进分区。
+ */
+function radialPath(x, yLand) {
+  const yEnd = yLand === undefined ? 96 : yLand
+  const dx = x - HOLE.x
+  const dy = yEnd - HOLE.y
+  const len = Math.hypot(dx, dy) || 1
+  const sx = HOLE.x + (dx / len) * (HOLE.r + 8)
+  const sy = HOLE.y + (dy / len) * (HOLE.r + 8)
+  const c1x = sx + dx * 0.38
+  const c1y = sy + dy * 0.22
+  // 控制点按"黑洞到端口"的距离换算，换画布高度不用改这个函数
+  const pull = yEnd + (HOLE.y - yEnd) * 0.28
+  return `M ${sx.toFixed(1)} ${sy.toFixed(1)} C ${c1x.toFixed(1)} ${c1y.toFixed(1)}, ${x} ${pull.toFixed(0)}, ${x} ${yEnd}`
+}
+
+function buildFiber() {
+  const g = $('fiberNet')
+  const out = []
+  // 顶栏总线：每股 = 护套 + 芯 + 流动光 + 光点
+  TRUNK_Y.forEach((y, i) => {
+    const c = TRUNK_C[i % TRUNK_C.length]
+    const d = `M 14 ${y} L 1906 ${y}`
+    out.push(`<path class="jacket" d="${d}"/>`)
+    out.push(`<path class="core" style="stroke:${c};opacity:${0.9 - i * 0.1}" d="${d}"/>`)
+    out.push(`<path class="flow" style="animation-delay:${-i * 0.35}s" d="${d}"/>`)
+    for (let k = 0; k < 2; k++) {
+      out.push(`<circle class="dot" r="${2.2 + (i % 2) * 0.5}" style="offset-path:path('${d}');animation-duration:calc(var(--dur) * ${1.6 + i * 0.25});animation-delay:${-(k * 1.1 + i * 0.4)}s"/>`)
+    }
+  })
+  // 分区竖缆：沿分区线向下走（光向下流），并在总线处放一个分光耦合点
+  ZONE_X.forEach((x, i) => {
+    const c = DROP_C[i % DROP_C.length]
+    const d = `M ${x} 46 L ${x} 458`
+    out.push(`<path class="jacket" d="${d}"/>`)
+    out.push(`<path class="core" style="stroke:${c};opacity:.75" d="${d}"/>`)
+    out.push(`<path class="flow" style="animation-delay:${-i * 0.5}s" d="${d}"/>`)
+    for (let k = 0; k < 3; k++) {
+      out.push(`<circle class="dot" r="2.4" style="offset-path:path('${d}');animation-duration:calc(var(--dur) * ${1.2 + k * 0.3});animation-delay:${-(k * 0.8 + i * 0.3)}s"/>`)
+    }
+    const cy = TRUNK_Y[2]
+    out.push(`<circle class="coupler" cx="${x}" cy="${cy}" r="3.4" style="stroke:${c}"/>`)
+    out.push(`<path class="core" style="stroke:${c};opacity:.45" d="M ${x} ${cy} L ${x} 46"/>`)
+  })
+  // ── 黑洞本体（画在总线之下，光纤看起来是从它身上长出去的）──
+  // 黑洞：正中 (960,231)，半径 140 = 原来 5 倍；**俯视视角**——吸积盘是围绕视界的整圈
+  const HX = 960, HY = 563, HR = 182   // 140 × 1.3：黑洞放大到 130%
+  // 多普勒亮弧：俯视盘里朝向观察者运动的一侧更亮（真实黑洞的招牌特征，一眼就像"转着的盘"）
+  const arc = (r, a0, a1) => {
+    const rad = (d) => (d * Math.PI) / 180
+    const x0 = HX + r * Math.cos(rad(a0)), y0 = HY + r * Math.sin(rad(a0))
+    const x1 = HX + r * Math.cos(rad(a1)), y1 = HY + r * Math.sin(rad(a1))
+    const large = Math.abs(a1 - a0) > 180 ? 1 : 0
+    return `M ${x0.toFixed(1)} ${y0.toFixed(1)} A ${r} ${r} 0 ${large} 1 ${x1.toFixed(1)} ${y1.toFixed(1)}`
+  }
+  out.push(`<g class="hole" id="holeGroup">
+    <circle class="halo" cx="${HX}" cy="${HY}" r="${HR * 2.2}"/>
+    <circle class="bloom" cx="${HX}" cy="${HY}" r="${HR * 0.62}"/>
+    <circle class="horizon" cx="${HX}" cy="${HY}" r="${HR}"/>
+    <circle class="disk4" cx="${HX}" cy="${HY}" r="${HR * 2.1}" stroke="#3ff0d8" stroke-width="1.1" stroke-dasharray="36 128" opacity=".34"/>
+    <circle class="disk2" cx="${HX}" cy="${HY}" r="${HR * 1.8}" stroke="#a06bff" stroke-width="2" stroke-dasharray="170 260" opacity=".5"/>
+    <circle class="disk" cx="${HX}" cy="${HY}" r="${HR * 1.5}" stroke="#39d0ff" stroke-width="2.6" stroke-dasharray="260 200" opacity=".62"/>
+    <circle class="disk3" cx="${HX}" cy="${HY}" r="${HR * 1.26}" stroke="#8fe8ff" stroke-width="1.4" stroke-dasharray="22 76" opacity=".5"/>
+    <circle class="hot" cx="${HX}" cy="${HY}" r="${HR * 1.12}" stroke-dasharray="90 420" opacity=".55"/>
+    <path class="beam" d="${arc(HR * 1.5, -50, 70)}" stroke="#ffffff" stroke-width="3.6"/>
+    <path class="beam" d="${arc(HR * 1.8, -30, 50)}" stroke="#a06bff" stroke-width="2.2"/>
+    <circle class="photon" cx="${HX}" cy="${HY}" r="${HR + 5}"/>
+    <circle class="photon" cx="${HX}" cy="${HY}" r="${HR * 1.34}" opacity=".16"/>
+  </g>`)
+  // ── 辐射缆：从**中心的黑洞**分别接到四个区（光包就走这条）──
+  PORTS.forEach((x, i) => {
+    const c = RADIAL_C[i % RADIAL_C.length]
+    const d = radialPath(x)
+    out.push(`<path class="jacket" d="${d}" style="opacity:.5"/>`)
+    out.push(`<path class="core" style="stroke:${c};opacity:.38" d="${d}"/>`)
+    out.push(`<path class="flow" style="animation-delay:${-i * 0.45}s" d="${d}"/>`)
+    for (let k = 0; k < 2; k++) {
+      out.push(`<circle class="dot" r="2.6" style="offset-path:path('${d}');animation-duration:calc(var(--dur) * ${1.1 + k * 0.35});animation-delay:${-(k * 0.7 + i * 0.3)}s"/>`)
+    }
+    out.push(`<circle class="coupler" cx="${x}" cy="96" r="3.6" style="stroke:${c}"/>`)
+  })
+  // 专供右下角 JEV 面板的那根：从黑洞甩到面板左侧
+  {
+    const d = radialPath(JEV_PORT.x, JEV_PORT.y)
+    out.push(`<path class="jacket" d="${d}" style="opacity:.5"/>`)
+    out.push(`<path class="core" style="stroke:#a06bff;opacity:.42" d="${d}"/>`)
+    out.push(`<path class="flow" d="${d}"/>`)
+    out.push(`<circle class="dot" r="2.8" style="offset-path:path('${d}');animation-duration:calc(var(--dur) * 1.2)"/>`)
+    out.push(`<circle class="coupler" cx="${JEV_PORT.x}" cy="${JEV_PORT.y}" r="3.6" style="stroke:#a06bff"/>`)
+  }
+  // 每个区顶上的短支线：辐射缆落点 → 该区（一小截竖直引线）
+  PORTS.forEach((x, i) => {
+    const c = RADIAL_C[i % RADIAL_C.length]
+    const d = `M ${x} 96 L ${x} 118`
+    out.push(`<path class="jacket" d="${d}"/>`)
+    out.push(`<path class="core" style="stroke:${c};opacity:.6" d="${d}"/>`)
+    out.push(`<path class="flow" style="animation-delay:${-i * 0.4}s" d="${d}"/>`)
+    out.push(`<circle class="dot" r="2" style="offset-path:path('${d}');animation-duration:calc(var(--dur) * 1.1);animation-delay:${-i * 0.6}s"/>`)
+  })
+  g.innerHTML = out.join('')
+}
+
+/* ───────── 字符雨（Matrix）─────────
+   两处雨共用一套引擎与**同一个 requestAnimationFrame**（两个 rAF 会互相抢帧）：
+     · #rain      整屏背景雨：被派去的那一列送真实步骤文字
+     · #todoRain  待办字符流：每条待办一列，正在做的那列更亮并周期性"解码"成可读文字
+   为什么不用 shadowBlur 做发光：每个字形一次高斯模糊，几十列 × 每帧 = 掉帧。
+   改成"头字白 + 上一格淡青 + 上上格更淡"三层叠加，视觉接近但便宜一个数量级。 */
+const GLYPHS = 'ｱｲｳｴｵｶｷｸｹｺｻｼｽｾｿﾀﾁﾂﾃﾄﾅﾆﾇﾈﾉﾊﾋﾌﾍﾎﾏﾐﾑﾒﾓﾔﾕﾖﾗﾘﾙﾚﾛﾜﾝ0123456789ABCDEFGHJKLMNPQRSTUVWXYZ<>[]{}/\\|=+-*#$%&@'
+/* 尊重系统的"减少动态效果"：字符雨/生长动画降级，数据照常刷新 */
+const REDUCED = window.matchMedia && window.matchMedia('(prefers-reduced-motion: reduce)').matches
+const RAIN = { on: !REDUCED, font: 18, cols: [], ctx: null, last: 0, w: 1920, h: 1080 }
+const TODO = { ctx: null, cols: [], w: 748, h: 176, font: 14, items: [], stamp: 0 }
+
+function rainGlyph() {
+  return GLYPHS[Math.floor(Math.random() * GLYPHS.length)]
+}
+
+function rainInit() {
+  const c = $('rain')
+  if (!c) return
+  if (REDUCED) { $('rain').classList.add('off'); return }   // 尊重"减少动态效果"
+  RAIN.ctx = c.getContext('2d')
+  RAIN.cols = []
+  for (let x = 6; x < RAIN.w; x += RAIN.font + 1) {
+    RAIN.cols.push({ x, y: Math.random() * RAIN.h, sp: 0.5 + Math.random() * 1.3, label: '', li: 0, ttl: 0 })
+  }
+  const t = $('todoRain')
+  if (t) todoRainInit(t)
+}
+
+/** 速度系数：与光纤 --dur / 黑洞同一套语义（忙 → 快） */
+function rainSpeedFactor() {
+  const cls = $('screen').dataset.flow || 'idle'
+  return cls === 'busy' ? 1.9 : cls === 'waiting' ? 1.15 : cls === 'error' ? 1.5 : 0.6
+}
+
+/** 整屏雨：派最靠近 nearX 的那一列去送一段真实文字（从屏幕上方开始，逐字吐出） */
+function rainBurst(text, nearX) {
+  if (!RAIN.on || !RAIN.cols.length) return
+  const clean = String(text || '').replace(/\s+/g, ' ').trim()
+  if (clean.length < 2) return
+  let best = RAIN.cols[0]
+  let bestD = Infinity
+  for (const c of RAIN.cols) {
+    const d = Math.abs(c.x - (nearX || RAIN.w / 2))
+    if (d < bestD) { bestD = d; best = c }
+  }
+  best.label = clean.slice(0, 64)
+  best.li = 0
+  best.ttl = Math.min(9000, 260 * clean.length)
+  best.y = -RAIN.font * 2
+  best.sp = 0.8 + Math.random() * 0.5
+}
+
+/* ── 待办字符流 ── */
+function todoRainInit(canvas) {
+  TODO.ctx = canvas.getContext('2d')
+  TODO.w = canvas.width
+  TODO.h = canvas.height
+  TODO.cols = []
+  const n = Math.max(8, Math.floor(TODO.w / 15))
+  for (let i = 0; i < n; i++) {
+    TODO.cols.push({
+      x: 6 + i * 15 + (i % 3),
+      y: Math.random() * TODO.h,
+      sp: 0.5 + Math.random() * 1.1,
+      item: -1,          // 这一列承载第几条待办（-1 = 纯装饰）
+      li: 0,
+      decode: 0,         // >0 时这一列"解码"成可读文字（还剩多少 ms）
+      next: Math.random() * 4000,
+    })
+  }
+  // 把每条待办指派到一列上（均匀铺开，别挤在一角）
+  const nItems = TODO.items.length
+  TODO.cols.forEach((c, i) => { c.item = -1 })
+  if (nItems > 0) {
+    for (let k = 0; k < nItems; k++) {
+      const idx = nItems === 1 ? Math.floor(TODO.cols.length / 2)
+        : Math.round(k * (TODO.cols.length - 1) / (nItems - 1))
+      TODO.cols[Math.max(0, Math.min(TODO.cols.length - 1, idx))].item = k
+    }
+  }
+}
+
+/** 待办数据变了就重排（条数/文本变化时才动，避免每帧重建） */
+function todoRainSync(items) {
+  const key = items.map((t) => (t.status || '') + '|' + (t.content || '')).join('§')
+  if (key === TODO.key) return
+  TODO.key = key
+  TODO.items = items
+  const t = $('todoRain')
+  if (t) todoRainInit(t)
+}
+
+function drawTodoRain(dt, k) {
+  const ctx = TODO.ctx
+  if (!ctx || !RAIN.on) return
+  if ($('screen').classList.contains('hidetodo')) return   // 藏起来了就别浪费每帧的绘制
+  ctx.fillStyle = 'rgba(1,5,10,0.12)'
+  ctx.fillRect(0, 0, TODO.w, TODO.h)
+  ctx.font = TODO.font + 'px ui-monospace, Menlo, Consolas, monospace'
+  ctx.textBaseline = 'top'
+  for (const c of TODO.cols) {
+    const item = c.item >= 0 ? TODO.items[c.item] : null
+    const status = item ? (item.status || 'pending') : 'deco'
+    const doing = status === 'in_progress'
+    const done = status === 'completed'
+    c.y += c.sp * k * dt * (doing ? 0.10 : done ? 0.05 : 0.075)
+    if (c.y > TODO.h + TODO.font * 2) {
+      c.y = -Math.random() * 120
+      c.sp = 0.5 + Math.random() * 1.1
+    }
+    // 解码窗口：正在做的那条更频繁地"解码"成可读文字
+    c.next -= dt
+    if (item && c.next <= 0) {
+      c.decode = doing ? 1100 : done ? 500 : 800
+      c.li = 0
+      c.next = (doing ? 2200 : 4200) + Math.random() * 2600
+    }
+    if (c.decode > 0) c.decode -= dt
+
+    const text = item ? String(item.content || '') : ''
+    const head = text
+      ? (c.decode > 0 ? text[c.li++ % text.length] : (Math.random() < 0.5 ? text[Math.floor(Math.random() * text.length)] : rainGlyph()))
+      : rainGlyph()
+    ctx.fillStyle = doing ? '#fff3d0' : done ? '#8ff0bd' : '#eaf7ff'
+    ctx.fillText(head, c.x, c.y)
+    ctx.fillStyle = doing ? 'rgba(255,199,71,0.75)' : done ? 'rgba(94,242,160,0.55)' : 'rgba(57,208,255,0.7)'
+    ctx.fillText(text && Math.random() < 0.5 ? text[Math.floor(Math.random() * text.length)] : rainGlyph(), c.x, c.y - TODO.font * 1.05)
+    ctx.fillStyle = doing ? 'rgba(255,199,71,0.3)' : done ? 'rgba(94,242,160,0.22)' : 'rgba(57,208,255,0.25)'
+    ctx.fillText(rainGlyph(), c.x, c.y - TODO.font * 2.1)
+  }
+}
+
+function rainFrame(ts) {
+  const dt = Math.min(60, ts - (RAIN.last || ts))
+  RAIN.last = ts
+  if (RAIN.on) {
+    const k = rainSpeedFactor()
+    const ctx = RAIN.ctx
+    if (ctx) {
+      ctx.fillStyle = 'rgba(3,7,12,0.10)'
+      ctx.fillRect(0, 0, RAIN.w, RAIN.h)
+      ctx.font = RAIN.font + 'px ui-monospace, Menlo, Consolas, monospace'
+      ctx.textBaseline = 'top'
+      for (const c of RAIN.cols) {
+        c.y += c.sp * k * dt * 0.075
+        if (c.y > RAIN.h + RAIN.font * 2) {
+          c.y = -Math.random() * 260
+          c.sp = 0.5 + Math.random() * 1.3
+          if (Math.random() < 0.25) { c.label = ''; c.ttl = 0 }
+        }
+        let ch
+        let color = '#eaf7ff'
+        if (c.label && c.ttl > 0) {
+          ch = c.label[c.li % c.label.length]
+          c.li++
+          c.ttl -= dt
+          if (c.ttl <= 0) { c.label = ''; c.li = 0 }
+          color = '#ffffff'
+        } else {
+          ch = rainGlyph()
+          if (Math.random() < 0.06) color = '#ff6fd8'
+        }
+        ctx.fillStyle = color
+        ctx.fillText(ch, c.x, c.y)
+        ctx.fillStyle = 'rgba(57,208,255,0.7)'
+        ctx.fillText(rainGlyph(), c.x, c.y - RAIN.font * 1.05)
+        ctx.fillStyle = 'rgba(57,208,255,0.25)'
+        ctx.fillText(rainGlyph(), c.x, c.y - RAIN.font * 2.1)
+      }
+    }
+    drawTodoRain(dt, k)
+  }
+  requestAnimationFrame(rainFrame)
+}
+
+/** 文字先被字符替换一下再定住（用在"正在做"这种会变的行上） */
+let scrambleTimer = null
+function scrambleText(el, finalText) {
+  if (!el) return
+  if (el.dataset.scrambling === '1') return
+  el.dataset.scrambling = '1'
+  const target = String(finalText ?? '')
+  let n = 0
+  if (scrambleTimer) clearInterval(scrambleTimer)
+  scrambleTimer = setInterval(() => {
+    n++
+    if (n >= 7) {
+      clearInterval(scrambleTimer)
+      scrambleTimer = null
+      el.textContent = target
+      delete el.dataset.scrambling
+      return
+    }
+    let out = ''
+    for (let i = 0; i < target.length; i++) out += (Math.random() < 0.55 ? rainGlyph() : target[i])
+    el.textContent = out
+  }, 42)
+}
+
+/* ───────── 工具调用线程：从黑洞边缘长出来（分两层画）─────────
+   为什么分两层：一个会话跑下来工具调用会有几百次（实测这一会话 330+）。
+   全画成带标签的单根必然糊成一片、标签也读不出来；只画十几根又看不出"总量"。
+   所以：
+     · **历史束**：按工具类型各占一个扇区，扇区里画 N 根发丝（N = min(该工具调用数, 48)），
+       扇区宽度/发丝数/浓度都随调用量走，端头用 `工具 ×N` 标出真实次数 —— 一眼看出总量与构成。
+     · **最近单根**：最近 14 次调用画成带工具名与耗时的单根（生长动画、正在跑的脉动）。
+   计数取自 /api/state 的 stats.toolCounts（60 秒一次的全量扫描，是**整个会话**的真实累计），
+   不是时间线窗口里的那几条 —— 这也是"300 多个"这个数字的来源。 */
+const TOOL_COLOR = {
+  bash: '#39d0ff', read: '#5ef2a0', write: '#5ef2a0', edit: '#5ef2a0',
+  grep: '#a06bff', glob: '#a06bff', web_search: '#ff6fd8', web_fetch: '#ff6fd8',
+  subagent: '#ffc247', subagent_fork: '#ffc247', workflow: '#ffc247',
+  todo_write: '#8b5cff', ask_user_question: '#ff6fd8', present: '#3ff0d8',
+  job_output: '#8fe8ff', job_list: '#8fe8ff', job_kill: '#ff9c94',
+  read_image: '#5ef2a0', modlens_read_image: '#5ef2a0', skill: '#ffc247',
+}
+const toolColor = (t) => TOOL_COLOR[t] || '#39d0ff'
+const DETAIL_MAX = 25        // 带标签的单根最多几条（20 → 40 → 25，按用户口径调）
+const BUNDLE_MAX_PER_TOOL = 48   // 每个工具最多画多少根发丝（再多也看不出差别）
+
+/* 增量渲染的状态：
+   · bundleKey：装配（各工具调用次数）没变就不重画那层发丝
+   · detailEls：callId → 已画好的 <g>，数据没变的条目不重建 ——
+     这样**只有新出现的那几次调用会播放"抽出来"的生长动画**。
+     （早先每次重画全部，结果是每来一次新调用，屏幕上所有线程一起重放动画，很闪。） */
+let bundleKey = ''
+const detailEls = new Map()
+let detailSeq = 0
+
+function threadPath(cx, cy, r0, ang, len, bend) {
+  const sx = cx + Math.cos(ang) * r0
+  const sy = cy + Math.sin(ang) * r0
+  const x1 = cx + Math.cos(ang) * (r0 + len)
+  const y1 = cy + Math.sin(ang) * (r0 + len)
+  const mx = cx + Math.cos(ang + bend) * (r0 + len * 0.55)
+  const my = cy + Math.sin(ang + bend) * (r0 + len * 0.55)
+  return { d: `M ${sx.toFixed(1)} ${sy.toFixed(1)} Q ${mx.toFixed(1)} ${my.toFixed(1)} ${x1.toFixed(1)} ${y1.toFixed(1)}`, x1, y1 }
+}
+
+function renderToolThreads() {
+  if (!SNAP) return
+  const counts = (SNAP.stats && SNAP.stats.toolCounts) || null
+  const calls = (SNAP.timeline || []).filter((r) => r.kind === 'tool')
+  const agg = counts || calls.reduce((a, r) => { a[r.tool] = (a[r.tool] || 0) + 1; return a }, {})
+  const detail = calls.slice(-DETAIL_MAX)
+  const cx = HOLE.x
+  const cy = HOLE.y
+  const r0 = HOLE.r + 6
+
+  // ── ① 历史束（按量）──
+  const entries = Object.entries(agg).filter(([, n]) => n > 0).sort((a, b) => b[1] - a[1])
+  const total = entries.reduce((a, [, n]) => a + n, 0) || 1
+  const bk = entries.map(([t, n]) => t + ':' + n).join(',')
+  const bundles = $('toolBundles')
+  if (bundles && bk !== bundleKey) {
+    bundleKey = bk
+    const gap = entries.length > 1 ? 0.16 : 0
+    const usable = Math.PI * 2 - gap * Math.max(0, entries.length - 1)
+    const out = []
+    let ang = -Math.PI / 2
+    for (const [tool, n] of entries) {
+      const span = Math.max(0.05, usable * (n / total))
+      const strands = Math.max(1, Math.min(BUNDLE_MAX_PER_TOOL, n))
+      const col = toolColor(tool)
+      const share = n / total
+      for (let k = 0; k < strands; k++) {
+        const t = strands === 1 ? 0.5 : k / (strands - 1)
+        const a = ang + span * t
+        const len = 168 + 54 * Math.log10(1 + n) + ((k * 37) % 23)
+        const p = threadPath(cx, cy, r0, a, len, 0.1)
+        const op = Math.max(0.08, Math.min(0.34, 0.1 + share * 0.5))
+        out.push(`<path d="${p.d}" style="fill:none;stroke:${col};stroke-width:0.9;opacity:${op.toFixed(2)}"/>`)
+      }
+      const aMid = ang + span / 2
+      const lr = r0 + 168 + 54 * Math.log10(1 + n) + 16
+      out.push(`<text class="tt" x="${(cx + Math.cos(aMid) * lr).toFixed(1)}" y="${(cy + Math.sin(aMid) * lr).toFixed(1)}" style="fill:${col};opacity:.9">${esc(tool)} ×${n}</text>`)
+      ang += span + gap
+    }
+    bundles.innerHTML = out.join('')
+    const legend = $('threadLegend')
+    if (legend) legend.textContent = '工具调用 ' + total + ' 次 · 束=各工具总量 · 单根=最近 ' + DETAIL_MAX + ' 次'
+  }
+
+  // ── ② 明细层 ──
+  const layer = $('toolDetail')
+  if (!layer) return
+
+  const want = new Map()
+  detail.forEach((r) => want.set(String(r.callId || ('i' + r.i)), r))
+  for (const [id, el] of detailEls) {
+    if (!want.has(id)) { el.g.remove(); detailEls.delete(id) }
+  }
+  for (const [id, r] of want) {
+    const col = toolColor(r.tool)
+    const ms = r.result && typeof r.result.ms === 'number' ? r.result.ms : null
+    const label = r.tool + (ms !== null ? ' ' + ms + 'ms' : (r.running ? ' …' : ''))
+    const known = detailEls.get(id)
+    if (known) {
+      // 已存在：只更新"正在跑"的样式与标签（不重建，避免动画重放）
+      if (known.running !== !!r.running) {
+        known.running = !!r.running
+        known.g.classList.toggle('running', known.running)
+      }
+      if (known.label !== label) {
+        known.label = label
+        known.text.textContent = label
+      }
+      continue
+    }
+    // 新的：按黄金角取一个稳定角度（创建时定死，之后不再变），并播放生长动画
+    const a = (-96 + detailSeq * 137.508) * Math.PI / 180
+    detailSeq++
+    const slow = ms !== null ? Math.min(1, ms / 3000) : 0.35
+    const len = 210 + slow * 240
+    const p = threadPath(cx, cy, r0, a, len, 0.22)
+    const g = document.createElementNS('http://www.w3.org/2000/svg', 'g')
+    g.setAttribute('class', 'thread' + (r.running ? ' running' : ''))
+    g.innerHTML =
+      `<path class="tj" d="${p.d}"/>` +
+      `<path class="tc" pathLength="1" style="stroke:${col}" d="${p.d}"/>` +
+      `<path class="tf" style="animation-delay:${(-detailSeq * 0.37).toFixed(2)}s" d="${p.d}"/>` +
+      `<circle class="tip" cx="${p.x1.toFixed(1)}" cy="${p.y1.toFixed(1)}" r="3.2" style="stroke:${col}"/>` +
+      `<text class="tt" x="${(p.x1 + 7).toFixed(1)}" y="${(p.y1 + 3).toFixed(1)}">${esc(label)}</text>`
+    layer.appendChild(g)
+    detailEls.set(id, { g, label, running: !!r.running, text: g.querySelector('text') })
+  }
+}
+
+/* ───────── 步骤光包：把 DSH 的每一步送进光纤 ─────────
+   数据源是 /api/state 的 timeline：每条 = 一步（user / assistant(含思考) / tool / todo / turn）。
+   每发现新的一步，就生成一个光包沿"总线 → 该区支线"飞过去：
+     · 思考·回复 → 落「会话」区（时间线就是步骤流水）
+     · 工具调用 → 落「会话」区，但标签写工具名 + 参数摘要 + 正在跑
+     · 待办变更 → 落「会话」区
+     · JEV 判定回来 → 落「JEV」区（带 main 值）
+     · 用量刷新 → 落「用量」区
+   限流：同时最多 MAX_PKT 个包；一秒里挤进来很多步时，多余的合并成一个「⊕N 步」包，
+   否则 agent 疯狂调工具时会把屏幕糊成一片。 */
+const ZONE_OF = { user: 690, assistant: 690, tool: 690, todo: 690, turn: 690, jev: 1500, usage: 1710 }
+const MAX_PKT = 7
+let seenEventKey = null
+let pktAlive = 0
+let stepCount = 0
+let pendingSteps = []
+
+function stepLabel(r) {
+  if (r.kind === 'tool') {
+    const b = (r.brief || '').replace(/\s+/g, ' ')
+    return (r.running ? '▶ ' : '') + (r.tool || 'tool') + (b ? ' · ' + clip(b, 40) : '')
+  }
+  if (r.kind === 'assistant') {
+    // 思考也要"带上"：优先把思考正文的开头放进标签，而不是只报字数
+    const think = (r.reasoning || '').replace(/\s+/g, ' ').trim()
+    if (!r.hasText && think) return '思考「' + clip(think, 44) + '」'
+    if (!r.hasText && r.reasoningLen) return '思考 ' + (r.reasoningLen / 1000).toFixed(1) + 'k 字 · step ' + (r.step ?? '')
+    if (r.hasText) return '回复「' + clip((r.text || '').replace(/\s+/g, ' '), 40) + '」'
+    return '思考 step ' + (r.step ?? '')
+  }
+  if (r.kind === 'user') return '指令「' + clip((r.text || '').replace(/\s+/g, ' '), 36) + '」'
+  if (r.kind === 'todo') return '待办 ' + r.done + '/' + r.total + (r.current ? ' · ' + clip(r.current, 30) : '')
+  if (r.kind === 'turn') return 'turn ' + (r.turn ?? '') + (r.phase === 'end' ? ' 结束' : ' 开始')
+  return r.kind
+}
+
+/** 生成一个光包，沿 trunkY → 支线 x 落到该区 */
+function spawnPacket(kind, label, x) {
+  const g = $('fiberNet')
+  if (!g) return
+  // 隐藏执行命令时：工具类光包不带文字（命令不再出现在屏上），光包本身照飞
+  if (kind === 'tool' && $('screen').classList.contains('hidecmd')) label = ''
+  if (pktAlive >= MAX_PKT) { pendingSteps.push({ kind, label, x }); return }
+  // 起点 = 黑洞边缘，终点 = 该区端口（JEV 走右下角那条）；飞行的就是界面上那条辐射缆
+  const d = x === ZONE_OF.jev ? radialPath(JEV_PORT.x, JEV_PORT.y) : radialPath(x)
+  const ns = 'http://www.w3.org/2000/svg'
+  const wrap = document.createElementNS(ns, 'g')
+  wrap.setAttribute('class', 'pkt ' + kind)
+  // 彗尾：沿同一条路径再走一遍，短一点、淡一点
+  wrap.innerHTML =
+    `<path class="tail" d="${d}" style="stroke-dasharray:26 1000;animation:dashmove linear infinite;animation-duration:1s"/>` +
+    `<circle class="halo" r="10"/>` +
+    `<circle class="head" r="3.6"/>` +
+    `<text x="9" y="-5">${esc(clip(label, 52))}</text>`
+  const dur = 1.6 + Math.min(1.4, label.length / 40)
+  wrap.style.offsetPath = `path('${d}')`
+  wrap.style.animationDuration = dur + 's'
+  pktAlive++
+  flashHole()
+  rainBurst(label, x)      // 同一步：光纤里飞光包，字符雨里落一列真实文字
+  wrap.addEventListener('animationend', () => {
+    pktAlive--
+    wrap.remove()
+    flashZone(x)
+    if (pendingSteps.length) {
+      const p = pendingSteps.shift()
+      spawnPacket(p.kind, p.label, p.x)
+    }
+  })
+  g.appendChild(wrap)
+}
+
+/** 光包诞生 = 黑洞闪一下（"这一步是从思考里吐出来的"） */
+function flashHole() {
+  const h = $('holeGroup')
+  if (!h) return
+  h.classList.remove('flash')
+  void h.getBoundingClientRect?.()
+  h.classList.add('flash')
+}
+
+function flashZone(x) {
+  if (x === ZONE_OF.jev) {
+    pulseJevFan()                        // 判定沿发散光纤分发下去
+    const panel = $('jevPanel')          // 顺带把右下角那块面板点亮一下
+    if (panel) {
+      panel.classList.remove('arrive')
+      void panel.offsetWidth
+      panel.classList.add('arrive')
+    }
+    return
+  }
+  const zones = document.querySelectorAll('.z')
+  // 三栏：150 → 本机；690 → 会话；1710 → 右列
+  const idx = x < 300 ? 0 : x < 1500 ? 1 : 2
+  const z = zones[idx]
+  if (!z) return
+  z.classList.remove('arrive')
+  void z.offsetWidth
+  z.classList.add('arrive')
+}
+
+/** 每次取数后：把新出现的每一步发成光包 */
+function pumpSteps(s) {
+  const rows = (s.timeline || []).filter((r) => ['user', 'assistant', 'tool', 'todo', 'turn'].includes(r.kind))
+  if (!rows.length) return
+  const key = rows[rows.length - 1].i
+  if (seenEventKey === null) {           // 首帧只对齐游标，不倒灌历史（否则一进页面就是几十个包）
+    seenEventKey = key
+    stepCount = rows.length
+    $('stepBadge').textContent = '步骤 ' + stepCount
+    return
+  }
+  if (key === seenEventKey) return
+  const fresh = rows.filter((r) => r.i > seenEventKey)
+  seenEventKey = key
+  stepCount += fresh.length
+  $('stepBadge').textContent = '步骤 ' + stepCount + (s.agent?.state === 'busy' ? ' · 进行中' : '')
+  if (fresh.length > 4) {                // 挤进来太多：合并成一个包，别糊屏
+    spawnPacket('assistant', '⊕ ' + fresh.length + ' 步（' + stepLabel(fresh[fresh.length - 1]).slice(0, 30) + '）', ZONE_OF.assistant)
+    return
+  }
+  for (const r of fresh) spawnPacket(r.kind, stepLabel(r), ZONE_OF[r.kind] || ZONE_OF.assistant)
+}
+
+/** JEV 判定回来 / 用量刷新各发一个包（走到对应分区） */
+function spawnInfoPacket(kind, label) {
+  spawnPacket(kind, label, ZONE_OF[kind] || ZONE_OF.assistant)
+}
+
+/* ───────── 发散光纤：把 JEV 的每条判定画成一根光纤 ─────────
+   几何：入口固定在 (198,2)——与从总线下来、进入 JEV 区的那根竖缆对齐；
+   N 条支线扇开落到 y≈92 的 N 个端点，每个端点一颗耦合珠 + 该判定的主值。
+   颜色/数值直接用答案，所以"发散光纤长什么样"= 判定本身，而不是装饰。 */
+const JEV_ENTRY_X = 198
+
+function jevStrandColor(a) {
+  if (!a) return '#2b4e6d'
+  if (a.type === 'choice') return '#39d0ff'
+  if (a.type === 'score') return '#a06bff'
+  const p = a.noul ?? 0.5
+  return p >= 0.62 ? '#ff6fd8' : p <= 0.38 ? '#39a8ff' : '#8a97a3'
+}
+
+function drawJevFan() {
+  const svg = $('jevFan')
+  if (!svg) return
+  const ans = (JEV && JEV.data && JEV.data.answers) ? JEV.data.answers : null
+  let keys = ans ? LENSES.map((l) => l.key).filter((k) => ans[k]) : []
+  // 兜底：问题集被改过（问答的 key 不在 LENSES 里）时，按答案自己的 key 画，
+  // 否则扇面会静默退化成"等待判定"——那种失败很难看出来。
+  if (ans) keys = keys.concat(Object.keys(ans).filter((k) => !keys.includes(k)))
+  if (!keys.length) {
+    // 还没有判定：画一根待机的引入线，说明"这里会散开"
+    svg.innerHTML = `<path class="j" d="M ${JEV_ENTRY_X} 0 L ${JEV_ENTRY_X} 26"/>` +
+      `<path class="c" style="stroke:#2b4e6d" d="M ${JEV_ENTRY_X} 0 L ${JEV_ENTRY_X} 26"/>` +
+      `<text class="cap" x="${JEV_ENTRY_X + 8}" y="34">等待 JEV 判定…</text>`
+    return
+  }
+  const n = keys.length
+  const y0 = 2, y1 = 158
+  const left = 34, right = 366
+  const step = n > 1 ? (right - left) / (n - 1) : 0
+  let out = []
+  // 引入段（从区顶那条竖缆接下来）
+  out.push(`<path class="j" d="M ${JEV_ENTRY_X} 0 L ${JEV_ENTRY_X} 10"/>`)
+  out.push(`<path class="c" style="stroke:#39d0ff" d="M ${JEV_ENTRY_X} 0 L ${JEV_ENTRY_X} 10"/>`)
+  const midY = (y0 + y1) / 2
+  keys.forEach((k, i) => {
+    const a = ans[k]
+    const lens = LENSES.find((l) => l.key === k) || { label: k, type: a.type }
+    const x = n > 1 ? left + step * i : JEV_ENTRY_X
+    const col = jevStrandColor(a)
+    const main = a.type === 'choice' ? String(a.choice) : a.type === 'score' ? a.score.toFixed(2) : a.noul.toFixed(2)
+
+    // ── 随机副股：每条判定周围再撒 2~4 条细线，让它像一束光缆，而不是三根干净的电线。
+    //    每次 drawJevFan() 都重新随机（判定每 20s 刷新一次），所以束形每次都不一样。
+    //    副股只做视觉：不带标签、不带数值、更细更暗，避免跟主股抢读。 ──
+    const dup = 2 + Math.floor(Math.random() * 3)
+    for (let j = 0; j < dup; j++) {
+      const xj = Math.max(12, Math.min(388, x + (Math.random() - 0.5) * 54))
+      const ex = JEV_ENTRY_X + (Math.random() - 0.5) * 26
+      const bend = midY + (Math.random() - 0.5) * 26
+      const ey = y1 - Math.random() * 10
+      const dj = `M ${ex.toFixed(1)} 10 C ${ex.toFixed(1)} ${bend.toFixed(1)}, ${xj.toFixed(1)} ${bend.toFixed(1)}, ${xj.toFixed(1)} ${ey.toFixed(1)}`
+      const op = (0.12 + Math.random() * 0.26).toFixed(2)
+      const sw = (0.7 + Math.random() * 0.9).toFixed(2)
+      out.push(`<path class="cx" style="stroke:${col};opacity:${op};stroke-width:${sw}" d="${dj}"/>`)
+      if (Math.random() < 0.55) {
+        out.push(`<path class="f" style="animation-delay:${(-Math.random() * 1.5).toFixed(2)}s" d="${dj}"/>`)
+      }
+      if (Math.random() < 0.35) {
+        out.push(`<circle class="d" r="${(1.3 + Math.random() * 1.2).toFixed(1)}" style="offset-path:path('${dj}');animation-delay:${(-Math.random() * 1.6).toFixed(2)}s"/>`)
+      }
+    }
+
+    // ── 主股：带耦合端点、数值与标签，保持可读 ──
+    const d = `M ${JEV_ENTRY_X} 10 C ${JEV_ENTRY_X} ${midY}, ${x} ${midY}, ${x} ${y1}`
+    out.push(`<path class="j" d="${d}"/>`)
+    out.push(`<path class="c" style="stroke:${col};opacity:.82" d="${d}"/>`)
+    out.push(`<path class="f" style="animation-delay:${-i * 0.3}s" d="${d}"/>`)
+    out.push(`<circle class="d" r="2.4" style="offset-path:path('${d}');animation-delay:${-i * 0.45}s"/>`)
+    out.push(`<circle class="coupler" cx="${x}" cy="${y1}" r="3.6" style="stroke:${col}"/>`)
+    out.push(`<circle class="d" r="1.8" cx="${x}" cy="${y1}" style="offset-path:none;opacity:.9;animation:none"/>`)
+    out.push(`<text class="val" x="${x}" y="${y1 + 20}" text-anchor="middle" style="fill:${col}">${esc(clip(main, 12))}</text>`)
+    out.push(`<text class="lbl" x="${x}" y="${y1 + 33}" text-anchor="middle">${esc(clip(lens.label || k, 12))}</text>`)
+  })
+  out.push(`<text class="cap" x="6" y="11">JEV 发散 · ${n} 条判定</text>`)
+  svg.innerHTML = out.join('')
+}
+
+/** 判定到达时整束点亮一次（就是"沿发散光纤分发下去"的那个瞬间） */
+let fanTimer = null
+function pulseJevFan() {
+  const svg = $('jevFan')
+  if (!svg || !svg.querySelector('.d')) return
+  svg.classList.add('on')
+  if (fanTimer) clearTimeout(fanTimer)
+  fanTimer = setTimeout(() => svg.classList.remove('on'), 2600)
+}
+
+/** 时间线光纤上的下流光脉冲（3 颗，错开） */
+function buildTimelinePulses() {
+  const tl = $('tl')
+  if (!tl || tl.dataset.pulsed) return
+  tl.dataset.pulsed = '1'
+  for (let i = 0; i < 3; i++) {
+    const d = document.createElement('i')
+    d.className = 'pulse'
+    d.style.animationDuration = 'calc(var(--dur) / 1.5)'
+    d.style.animationDelay = (-i * 0.9) + 's'
+    tl.appendChild(d)
+  }
+}
+
+/** 按 agent 状态调"流量"：busy 快、waiting 中、idle 慢 —— 光纤里有没有流量一眼可见 */
+function setFlow(state) {
+  const sc = $('screen')
+  const cls = ['busy', 'waiting', 'idle', 'error'].includes(state) ? state : 'idle'
+  if (sc.dataset.flow !== cls) {
+    sc.dataset.flow = cls
+    sc.classList.remove('busy', 'waiting', 'idle', 'error')
+    sc.classList.add(cls)
+  }
+}
+
+/* ── 主循环 ── */
+async function tick() {
+  try {
+    const r = await fetch('/api/state')
+    SNAP = await r.json()
+    renderTop(SNAP); renderSystem(SNAP); renderAgent(SNAP); renderUsage(SNAP); renderScreen(SNAP)
+    setFlow(SNAP.agent?.errorText ? 'error' : (SNAP.agent?.state || 'idle'))
+    buildTimelinePulses()
+    pumpSteps(SNAP)
+    renderToolThreads()
+    $('t-data').textContent = '数据 ' + new Date().toLocaleTimeString() + (SNAP.health?.session ? '' : ' · 无会话')
+    applyUiVersion(SNAP)
+  } catch (e) {
+    $('t-data').textContent = '取数失败（tools/console.sh start）'
+  }
+}
+setInterval(() => {
+  const d = new Date(), p = (n)=>String(n).padStart(2,'0')
+  $('p-clock').textContent = p(d.getHours())+':'+p(d.getMinutes())+':'+p(d.getSeconds())
+}, 1000)
+/* 远程视觉验证用的标定物：加 ?cal=1 时在两角画品红方块。
+   我改版式是"改完 → 海泰浏览器打开 → hdc 抓屏 → 看图"这条链路，
+   而浏览器缩放一变，页面坐标→屏幕坐标的映射就变了（按固定系数裁剪必然裁偏，已偏两次）。
+   有这两个已知坐标的高饱和色块，截图里一找就能反推缩放与原点，裁哪个区域都不会错。
+   正常访问不带这个参数，页面上一根多余的线都没有。 */
+/** 打开/关闭标定物（两角品红方块）。
+    除了 URL 的 ?cal=1，还能由服务端通过 /api/ui 动态开关 —— 因为要验证的可能是
+    任意一个已经开着的标签（它的 URL 里未必有 cal=1），而重新开标签又要抢焦点。 */
+function setCalMarks(on) {
+  for (const el of document.querySelectorAll('.calmark')) el.remove()
+  if (!on) return
+  for (const [x, y] of [[0, 0], [1896, 1056]]) {
+    const m = document.createElement('div')
+    m.className = 'calmark'
+    m.style.left = x + 'px'
+    m.style.top = y + 'px'
+    $('screen').appendChild(m)
+  }
+}
+if (location.search.indexOf('cal=1') >= 0) setCalMarks(true)
+
+/* ───────── 自动刷新（不用 Ctrl+R）─────────
+   只靠 1 秒轮询是不够的：**后台标签会被浏览器降频**（Chromium 隐藏页的定时器降到约 1 次/分钟），
+   所以"你在 DSH 里干活、改完切回浏览器"这个最常见的情况，轮询那条路会明显滞后 ——
+   表现出来就是"还得手动刷新"。这里补三个即时触发点：
+     · visibilitychange（切回这个标签）
+     · focus / pageshow（窗口获得焦点、从 bfcache 恢复）
+   —— 一获得可见性就立刻取一次 /api/state 比对指纹，变了就 reload。
+   另外轮询本身也照旧，前端在看的（可见）标签仍然是 1 秒级检测。 */
+async function checkUiVersion() {
+  try {
+    const r = await fetch('/api/state', { cache: 'no-store' })
+    applyUiVersion(await r.json())
+  } catch (e) { /* 取不到就算了，下一轮轮询会补上 */ }
+}
+
+function applyUiVersion(snap) {
+  if (!snap || !snap.ui) return
+  // 服务端下发的 UI 指令（当前只有标定物开关；按 id 去重，只执行一次）
+  const cmd = snap.ui.cmd
+  if (cmd && cmd.id && cmd.id !== window.__uiCmdId) {
+    window.__uiCmdId = cmd.id
+    try {
+      if (cmd.action === 'cal') setCalMarks(cmd.on !== false)
+    } catch (e) { /* 指令失败不影响数据刷新 */ }
+  }
+  if (!snap.ui.hash) return
+  if (!window.__uiHash) { window.__uiHash = snap.ui.hash; return }
+  if (window.__uiHash !== snap.ui.hash) {
+    window.__uiHash = snap.ui.hash      // 先记下，避免刷新失败时无限重试
+    location.reload()
+  }
+}
+
+document.addEventListener('visibilitychange', () => {
+  if (document.visibilityState === 'visible') checkUiVersion()
+})
+window.addEventListener('focus', checkUiVersion)
+window.addEventListener('pageshow', checkUiVersion)
+window.addEventListener('online', checkUiVersion)
+// 兜底：即使定时器被降频，也保证 20 秒内至少比对一次
+setInterval(checkUiVersion, 20000)
+
+$('screen').classList.add('hidetodo')      // 默认隐藏待办（用户要求先看没它的效果）
+$('screen').classList.add('hidetl')        // 执行命令（时间线）默认也隐藏
+$('tlBtn').addEventListener('click', () => {
+  const hidden = $('screen').classList.toggle('hidetl')
+  $('tlBtn').classList.toggle('on', !hidden)
+})
+$('screen').classList.add('hidecmd')       // 执行命令默认也隐藏
+$('cmdBtn').addEventListener('click', () => {
+  const hidden = $('screen').classList.toggle('hidecmd')
+  $('cmdBtn').classList.toggle('on', !hidden)
+})
+$('todoBtn').addEventListener('click', () => {
+  const hidden = $('screen').classList.toggle('hidetodo')
+  $('todoBtn').classList.toggle('on', !hidden)
+})
+
+buildFiber()
+drawJevFan()
+rainInit()
+requestAnimationFrame(rainFrame)
+
+
+fit()
+tick().then(() => { if (!JEV) jevAsk() })
+setInterval(tick, 1000)
+setInterval(jevAsk, 20000)
+</script>
+</body>
+</html>

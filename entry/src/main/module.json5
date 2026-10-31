@@ -1,0 +1,61 @@
+{
+  "module": {
+    "name": "entry",
+    "type": "entry",
+    "description": "$string:module_desc",
+    "mainElement": "EntryAbility",
+    "deviceTypes": [
+      "phone",
+      "tablet",
+      "2in1"
+    ],
+    "deliveryWithInstall": true,
+    "installationFree": false,
+    "pages": "$profile:main_pages",
+    "abilities": [
+      {
+        "name": "EntryAbility",
+        "srcEntry": "./ets/entryability/EntryAbility.ets",
+        "description": "$string:EntryAbility_desc",
+        "icon": "$media:startIcon",
+        "label": "$string:EntryAbility_label",
+        "startWindowIcon": "$media:startIcon",
+        "startWindowBackground": "$color:start_window_background",
+        // 允许的后台模式：startBackgroundRunning 会拿它做校验，
+        // 不声明的话**所有**模式都报 9800005 "bgMode is invalid"（真机实测过）
+        "backgroundModes": ["dataTransfer"],
+        "orientation": "auto_rotation",
+        "exported": true,
+        "skills": [
+          {
+            "entities": [
+              "entity.system.home"
+            ],
+            "actions": [
+              "action.system.home"
+            ]
+          }
+        ]
+      }
+    ],
+    "requestPermissions": [
+      {
+        "name": "ohos.permission.INTERNET"
+      },
+      {
+        "name": "ohos.permission.GET_NETWORK_INFO"
+      },
+      {
+        "name": "ohos.permission.KEEP_BACKGROUND_RUNNING"
+      }
+      ,
+      // ★ 运行锁：熄屏/休眠时保持 CPU 运行。
+      //   实测：设备熄屏后帧循环被冻结、屏上停更；continuous task 挡不住这一种。
+      //   PermissionDefinitions.json：RUNNING_LOCK 是 system_grant + normal 级别，
+      //   安装即授予，普通应用可申请。
+      {
+        "name": "ohos.permission.RUNNING_LOCK"
+      }
+    ]
+  }
+}

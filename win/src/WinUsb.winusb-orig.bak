@@ -1,0 +1,584 @@
+using System;
+using System.Collections.Generic;
+using System.Runtime.InteropServices;
+using System.Text;
+using System.Threading;
+
+namespace DshLcd
+{
+    /// <summary>
+    /// WinUSB 直连（不依赖 libusb / 驱动包）。
+    ///
+    /// 枚举思路：用 SetupDi 枚举 **GUID_DEVINTERFACE_WINUSB** 这个设备接口
+    /// （注意：不是 GUID_DEVINTERFACE_USB_DEVICE，两者不是同一个 GUID，详见
+    /// GuidUsbDeviceInterface 的注释）+ 按硬件 ID 过滤 VID/PID；
+    /// 再用 CreateFile + WinUsb_Initialize 拿到管道。
+    ///
+    /// 注意：本文件在无设备时也必须能安全跑完（--probe 就是靠这个在没有 LCD 的
+    /// 机器上验证枚举代码路径）。
+    /// </summary>
+    public static class WinUsb
+    {
+        private const uint GenericWriteU = 0x40000000;
+        private const uint GenericReadU = 0x80000000;
+        private const uint FileShareRead = 0x00000001;
+        private const uint FileShareWrite = 0x00000002;
+        private const uint OpenExisting = 3;
+        private const uint FileAttributeNormal = 0x00000080;
+        private static readonly IntPtr InvalidHandle = new IntPtr(-1);
+
+        private const uint DigcfPresent = 0x02;
+        private const uint DigcfDeviceInterface = 0x10;
+        private const uint SpdrpHardwareId = 0x00000001;   // SPDRP_HARDWAREID（0x00 是 DEVICEDESC，别写错）
+        private const uint PipeTransferTimeout = 0x03;
+
+        /// <summary>
+        /// ACK 慢帧门槛（毫秒）。厂商 C# 的 ACK 读超时是 100 ms，超了会拆掉重握手。
+        /// 见 trcc-linux issue #251 的"画面冻住"排查。
+        /// </summary>
+        private const int AckSlowThresholdMs = 100;
+
+        /// <summary>
+        /// ★ 必须是 GUID_DEVINTERFACE_WINUSB，不能写成 GUID_DEVINTERFACE_USB_DEVICE。
+        ///
+        /// 实机注册表（本机 VM，设备 USB\VID_0416&PID_5408\2025EC14575E）在
+        /// Control\DeviceClasses 下注册了三个接口：
+        ///   {3876e417-e089-4bcc-bbf8-47aba55e46fb}  设备自定义 DeviceInterfaceGUIDs
+        ///   {a5dcbf10-6530-11d2-901f-00c04fb951ed}  GUID_DEVINTERFACE_USB_DEVICE（由 usbhub 注册）
+        ///   {dee824ef-729b-4a0e-9c14-b7117d33a817}  ★ GUID_DEVINTERFACE_WINUSB
+        ///
+        /// 原实现用了 a5dcbf10，枚举到的是"USB 设备接口"那条路径。它能 CreateFile 成功，
+        /// 但 WinUsb_Initialize 稳定返回 6 (ERROR_INVALID_HANDLE) —— 因为该句柄不是
+        /// WinUSB 设备句柄。同一台机上 trofeo_lcd.exe（libusb）能正常推屏，就是因为
+        /// libusb 的 WinUSB 后端用的是下面这个 GUID。
+        /// </summary>
+        private static readonly Guid GuidUsbDeviceInterface =
+            new Guid("DEE824EF-729B-4A0E-9C14-B7117D33A817");
+
+        [StructLayout(LayoutKind.Sequential)]
+        private struct SP_DEVICE_INTERFACE_DATA
+        {
+            public uint cbSize;
+            public Guid InterfaceClassGuid;
+            public uint Flags;
+            public IntPtr Reserved;
+        }
+
+        [StructLayout(LayoutKind.Sequential)]
+        private struct SP_DEVINFO_DATA
+        {
+            public uint cbSize;
+            public Guid ClassGuid;
+            public uint DevInst;
+            public IntPtr Reserved;
+        }
+
+        [StructLayout(LayoutKind.Sequential, Pack = 1)]
+        private struct USB_INTERFACE_DESCRIPTOR
+        {
+            public byte bLength;
+            public byte bDescriptorType;
+            public byte bInterfaceNumber;
+            public byte bAlternateSetting;
+            public byte bNumEndpoints;
+            public byte bInterfaceClass;
+            public byte bInterfaceSubClass;
+            public byte bInterfaceProtocol;
+            public byte iInterface;
+        }
+
+        [StructLayout(LayoutKind.Sequential, Pack = 1)]
+        private struct WINUSB_PIPE_INFORMATION
+        {
+            public int PipeType;        // USBD_PIPE_TYPE
+            public byte PipeId;
+            public ushort MaximumPacketSize;
+            public byte Interval;
+        }
+
+        private const int UsbdPipeTypeControl = 0;
+        private const int UsbdPipeTypeBulk = 2;
+
+        [DllImport("setupapi.dll", CharSet = CharSet.Unicode, SetLastError = true)]
+        private static extern IntPtr SetupDiGetClassDevs(ref Guid classGuid, IntPtr enumerator, IntPtr hwndParent, uint flags);
+
+        [DllImport("setupapi.dll", SetLastError = true)]
+        private static extern bool SetupDiEnumDeviceInterfaces(IntPtr deviceInfoSet, IntPtr deviceInfoData,
+            ref Guid interfaceClassGuid, uint memberIndex, ref SP_DEVICE_INTERFACE_DATA deviceInterfaceData);
+
+        [DllImport("setupapi.dll", CharSet = CharSet.Unicode, SetLastError = true)]
+        private static extern bool SetupDiGetDeviceInterfaceDetail(IntPtr deviceInfoSet,
+            ref SP_DEVICE_INTERFACE_DATA deviceInterfaceData, IntPtr deviceInterfaceDetailData,
+            uint deviceInterfaceDetailDataSize, out uint requiredSize, ref SP_DEVINFO_DATA deviceInfoData);
+
+        [DllImport("setupapi.dll", CharSet = CharSet.Unicode, SetLastError = true)]
+        private static extern bool SetupDiGetDeviceRegistryProperty(IntPtr deviceInfoSet,
+            ref SP_DEVINFO_DATA deviceInfoData, uint property, out uint propertyRegDataType,
+            byte[] propertyBuffer, uint propertyBufferSize, out uint requiredSize);
+
+        [DllImport("setupapi.dll", SetLastError = true)]
+        private static extern bool SetupDiDestroyDeviceInfoList(IntPtr deviceInfoSet);
+
+        [DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
+        private static extern IntPtr CreateFile(string fileName, uint desiredAccess, uint shareMode,
+            IntPtr securityAttributes, uint creationDisposition, uint flagsAndAttributes, IntPtr templateFile);
+
+        [DllImport("kernel32.dll", SetLastError = true)]
+        private static extern bool CloseHandle(IntPtr handle);
+
+        [DllImport("winusb.dll", SetLastError = true)]
+        private static extern bool WinUsb_Initialize(IntPtr deviceHandle, out IntPtr interfaceHandle);
+
+        [DllImport("winusb.dll", SetLastError = true)]
+        private static extern bool WinUsb_Free(IntPtr interfaceHandle);
+
+        [DllImport("winusb.dll", SetLastError = true)]
+        private static extern bool WinUsb_QueryInterfaceSettings(IntPtr interfaceHandle, byte alternateInterfaceNumber,
+            ref USB_INTERFACE_DESCRIPTOR usbAltInterfaceDescriptor);
+
+        [DllImport("winusb.dll", SetLastError = true)]
+        private static extern bool WinUsb_QueryPipe(IntPtr interfaceHandle, byte alternateInterfaceNumber,
+            byte pipeIndex, ref WINUSB_PIPE_INFORMATION pipeInformation);
+
+        [DllImport("winusb.dll", SetLastError = true)]
+        private static extern bool WinUsb_WritePipe(IntPtr interfaceHandle, byte pipeId, byte[] buffer,
+            uint bufferLength, out uint lengthTransferred, IntPtr overlapped);
+
+        [DllImport("winusb.dll", SetLastError = true)]
+        private static extern bool WinUsb_ReadPipe(IntPtr interfaceHandle, byte pipeId, byte[] buffer,
+            uint bufferLength, out uint lengthTransferred, IntPtr overlapped);
+
+        [DllImport("winusb.dll", SetLastError = true)]
+        private static extern bool WinUsb_SetPipePolicy(IntPtr interfaceHandle, byte pipeId, uint policyType,
+            uint valueLength, ref uint value);
+
+        // ---------- 设备发现 ----------
+
+        public class DeviceRef
+        {
+            public string Path;
+            public string HardwareId;
+            public int Vid;
+            public int Pid;
+        }
+
+        /// <summary>列出所有 USB 设备接口（VID/PID 从硬件 ID 解析）</summary>
+        public static List<DeviceRef> Enumerate()
+        {
+            List<DeviceRef> list = new List<DeviceRef>();
+            Guid guid = GuidUsbDeviceInterface;
+            IntPtr set = SetupDiGetClassDevs(ref guid, IntPtr.Zero, IntPtr.Zero, DigcfPresent | DigcfDeviceInterface);
+            if (set == InvalidHandle || set == IntPtr.Zero)
+            {
+                Log.Err("SetupDiGetClassDevs 失败，错误码 {0}", Marshal.GetLastWin32Error());
+                return list;
+            }
+            try
+            {
+                uint index = 0;
+                while (true)
+                {
+                    SP_DEVICE_INTERFACE_DATA did = new SP_DEVICE_INTERFACE_DATA();
+                    did.cbSize = (uint)Marshal.SizeOf(typeof(SP_DEVICE_INTERFACE_DATA));
+                    if (!SetupDiEnumDeviceInterfaces(set, IntPtr.Zero, ref guid, index, ref did)) break;
+                    index++;
+
+                    SP_DEVINFO_DATA info = new SP_DEVINFO_DATA();
+                    info.cbSize = (uint)Marshal.SizeOf(typeof(SP_DEVINFO_DATA));
+
+                    uint required = 0;
+                    SetupDiGetDeviceInterfaceDetail(set, ref did, IntPtr.Zero, 0, out required, ref info);
+                    if (required == 0) continue;
+
+                    IntPtr buf = Marshal.AllocHGlobal((int)required);
+                    try
+                    {
+                        // cbSize 字段：32 位是 4+2，64 位是 8（含对齐）
+                        Marshal.WriteInt32(buf, IntPtr.Size == 8 ? 8 : 6);
+                        uint dummy;
+                        if (!SetupDiGetDeviceInterfaceDetail(set, ref did, buf, required, out dummy, ref info))
+                        {
+                            continue;
+                        }
+                        string path = Marshal.PtrToStringUni(new IntPtr(buf.ToInt64() + 4));
+                        if (string.IsNullOrEmpty(path)) continue;
+
+                        DeviceRef d = new DeviceRef();
+                        d.Path = path;
+                        d.HardwareId = ReadHardwareId(set, ref info);
+                        ParseVidPid(d);
+                        list.Add(d);
+                    }
+                    finally
+                    {
+                        Marshal.FreeHGlobal(buf);
+                    }
+                }
+            }
+            finally
+            {
+                // 注意：DeviceRef 里保存的 set 只在枚举期间有效，取完信息即可销毁
+                SetupDiDestroyDeviceInfoList(set);
+            }
+            return list;
+        }
+
+        private static string ReadHardwareId(IntPtr set, ref SP_DEVINFO_DATA info)
+        {
+            uint type, needed;
+            byte[] buf = new byte[1024];
+            if (SetupDiGetDeviceRegistryProperty(set, ref info, SpdrpHardwareId, out type, buf, (uint)buf.Length, out needed))
+            {
+                string s = Encoding.Unicode.GetString(buf, 0, (int)Math.Min(needed, (uint)buf.Length));
+                int z = s.IndexOf('\0');
+                if (z >= 0) s = s.Substring(0, z);
+                return s;
+            }
+            return "";
+        }
+
+        private static void ParseVidPid(DeviceRef d)
+        {
+            d.Vid = -1; d.Pid = -1;
+            string h = d.HardwareId == null ? "" : d.HardwareId.ToUpperInvariant();
+            int vi = h.IndexOf("VID_");
+            if (vi >= 0 && vi + 8 <= h.Length)
+            {
+                int v;
+                if (int.TryParse(h.Substring(vi + 4, 4), System.Globalization.NumberStyles.HexNumber, null, out v)) d.Vid = v;
+            }
+            int pi = h.IndexOf("PID_");
+            if (pi >= 0 && pi + 8 <= h.Length)
+            {
+                int p;
+                if (int.TryParse(h.Substring(pi + 4, 4), System.Globalization.NumberStyles.HexNumber, null, out p)) d.Pid = p;
+            }
+        }
+
+        // ---------- 设备句柄 ----------
+
+        public class LyDevice : IDisposable
+        {
+            public IntPtr FileHandle = InvalidHandle;
+            public IntPtr InterfaceHandle = IntPtr.Zero;
+            public byte PipeOut;
+            public byte PipeIn;
+            public bool HasIn;
+            public ushort OutMaxPacket;
+            public string Path = "";
+            public string HardwareId = "";
+            public int Vid = -1;
+            public int Pid = -1;
+            public int InterfaceNumber = -1;
+            public int Endpoints;
+            public bool Opened { get { return InterfaceHandle != IntPtr.Zero; } }
+
+            public void Dispose()
+            {
+                if (InterfaceHandle != IntPtr.Zero)
+                {
+                    try { WinUsb_Free(InterfaceHandle); } catch (Exception) { }
+                    InterfaceHandle = IntPtr.Zero;
+                }
+                if (FileHandle != InvalidHandle && FileHandle != IntPtr.Zero)
+                {
+                    try { CloseHandle(FileHandle); } catch (Exception) { }
+                    FileHandle = InvalidHandle;
+                }
+            }
+        }
+
+        /// <summary>
+        /// 打开指定 VID/PID 的设备。pid 传 0 表示只按 VID 匹配（0x5408 LY / 0x5409 LY1 都收）。
+        /// </summary>
+        public static LyDevice Open(int vid, int pid)
+        {
+            List<DeviceRef> all = Enumerate();
+            DeviceRef hit = null;
+            for (int i = 0; i < all.Count; i++)
+            {
+                DeviceRef d = all[i];
+                if (d.Vid != vid) continue;
+                if (pid != 0 && d.Pid != pid) continue;
+                hit = d;
+                break;
+            }
+            if (hit == null)
+            {
+                Log.W("没找到 VID=0x{0:X4} PID={1} 的设备（USB 设备共 {2} 个）",
+                    vid, pid == 0 ? "(任意)" : string.Format("0x{0:X4}", pid), all.Count);
+                return null;
+            }
+
+            LyDevice dev = new LyDevice();
+            dev.Path = hit.Path;
+            dev.HardwareId = hit.HardwareId;
+            dev.Vid = hit.Vid;
+            dev.Pid = hit.Pid;
+            // 打开前先记录路径：WinUsb_Initialize 报 6 (ERROR_INVALID_HANDLE) 时，
+            // 唯一能分辨"路径不是 WinUSB 设备的接口路径"还是"驱动真没绑"的证据就是它。
+            Log.W("打开设备：VID=0x{0:X4} PID=0x{1:X4} 硬件ID={2}", hit.Vid, hit.Pid, hit.HardwareId);
+            Log.W("设备路径：{0}", hit.Path);
+
+            // ★ 只用 GENERIC_WRITE 打开 —— 这一点是实测出来的：
+            //   libusb 的 Windows 后端（windows_winusb.c）刻意只请求 GENERIC_WRITE，
+            //   WinUSB 的所有传输都经 DeviceIoControl(IOCTL_WINUSB_*) 完成，
+            //   读方向并不需要 GENERIC_READ。
+            //   同一台机上 trofeo_lcd.exe（Rust/libusb）能正常出画面，而这里原来用
+            //   GR|GW 打开后 WinUsb_Initialize 稳定报 6 (ERROR_INVALID_HANDLE)，故改成与 libusb 一致。
+            dev.FileHandle = CreateFile(hit.Path, GenericWriteU,
+                FileShareRead | FileShareWrite, IntPtr.Zero, OpenExisting, FileAttributeNormal, IntPtr.Zero);
+            if (dev.FileHandle == InvalidHandle || dev.FileHandle == IntPtr.Zero)
+            {
+                Log.Err("CreateFile 失败（错误码 {0}）：{1}", Marshal.GetLastWin32Error(), hit.Path);
+                return null;
+            }
+            Log.W("CreateFile 成功，句柄=0x{0:X}", dev.FileHandle.ToInt64());
+
+            IntPtr iface;
+            if (!WinUsb_Initialize(dev.FileHandle, out iface))
+            {
+                int err = Marshal.GetLastWin32Error();
+                Log.Err("WinUsb_Initialize 失败（错误码 {0}）——设备可能不是 WinUSB 驱动", err);
+                // 落诊断：句柄是不是 INVALID、以及换成 GR|GW 重开一次的结果，
+                // 用来区分「访问权限组合不对」和「这块设备节点真的没绑 WinUSB」。
+                Log.W("  诊断：句柄=0x{0:X} IsInvalid={1}",
+                    dev.FileHandle.ToInt64(), dev.FileHandle == InvalidHandle);
+                dev.Dispose();
+                IntPtr h2 = CreateFile(hit.Path, GenericReadU | GenericWriteU,
+                    FileShareRead | FileShareWrite, IntPtr.Zero, OpenExisting, FileAttributeNormal, IntPtr.Zero);
+                if (h2 != InvalidHandle && h2 != IntPtr.Zero)
+                {
+                    IntPtr if2;
+                    bool ok2 = WinUsb_Initialize(h2, out if2);
+                    Log.W("  诊断：改回 GR|GW 重开 → {0}（错误码 {1}）",
+                        ok2 ? "成功" : "仍失败", ok2 ? 0 : Marshal.GetLastWin32Error());
+                    if (ok2) WinUsb_Free(if2);
+                    CloseHandle(h2);
+                }
+                else
+                {
+                    Log.W("  诊断：改回 GR|GW 连 CreateFile 都失败（错误码 {0}）", Marshal.GetLastWin32Error());
+                }
+                return null;
+            }
+            dev.InterfaceHandle = iface;
+
+            USB_INTERFACE_DESCRIPTOR desc = new USB_INTERFACE_DESCRIPTOR();
+            if (!WinUsb_QueryInterfaceSettings(iface, 0, ref desc))
+            {
+                Log.Err("WinUsb_QueryInterfaceSettings 失败（错误码 {0}）", Marshal.GetLastWin32Error());
+                dev.Dispose();
+                return null;
+            }
+            dev.InterfaceNumber = desc.bInterfaceNumber;
+            dev.Endpoints = desc.bNumEndpoints;
+
+            bool foundOut = false;
+            for (byte i = 0; i < desc.bNumEndpoints; i++)
+            {
+                WINUSB_PIPE_INFORMATION pi = new WINUSB_PIPE_INFORMATION();
+                if (!WinUsb_QueryPipe(iface, 0, i, ref pi)) continue;
+                if (pi.PipeType != UsbdPipeTypeBulk && pi.PipeType != UsbdPipeTypeControl) continue;
+                bool isIn = (pi.PipeId & 0x80) != 0;
+                if (isIn)
+                {
+                    dev.PipeIn = pi.PipeId;
+                    dev.HasIn = true;
+                }
+                else
+                {
+                    dev.PipeOut = pi.PipeId;
+                    dev.OutMaxPacket = pi.MaximumPacketSize;
+                    foundOut = true;
+                    // 给写管道设超时，避免设备不响应时整个循环挂死
+                    uint timeout = 2000;
+                    try { WinUsb_SetPipePolicy(iface, pi.PipeId, PipeTransferTimeout, 4, ref timeout); } catch (Exception) { }
+                }
+            }
+
+            if (!foundOut)
+            {
+                Log.Err("没有找到 bulk OUT 管道（端点 {0} 个）", desc.bNumEndpoints);
+                dev.Dispose();
+                return null;
+            }
+
+            Log.W("设备已打开：{0} 接口={1} 端点={2} OUT=0x{3:X2} IN={4} 最大包={5}",
+                dev.HardwareId, dev.InterfaceNumber, dev.Endpoints, dev.PipeOut,
+                dev.HasIn ? string.Format("0x{0:X2}", dev.PipeIn) : "(无)", dev.OutMaxPacket);
+            return dev;
+        }
+
+        // ---------- 读写 ----------
+
+        public static int Write(LyDevice dev, byte[] data, int offset, int count)
+        {
+            byte[] tmp;
+            if (offset == 0 && count == data.Length)
+            {
+                tmp = data;
+            }
+            else
+            {
+                tmp = new byte[count];
+                Array.Copy(data, offset, tmp, 0, count);
+            }
+            uint transferred;
+            bool ok = WinUsb_WritePipe(dev.InterfaceHandle, dev.PipeOut, tmp, (uint)tmp.Length, out transferred, IntPtr.Zero);
+            if (!ok)
+            {
+                return -1;
+            }
+            return (int)transferred;
+        }
+
+        public static int Read(LyDevice dev, byte[] buffer, int timeoutMs)
+        {
+            if (!dev.HasIn) return -1;
+            uint transferred;
+            bool ok = WinUsb_ReadPipe(dev.InterfaceHandle, dev.PipeIn, buffer, (uint)buffer.Length, out transferred, IntPtr.Zero);
+            if (!ok) return -1;
+            return (int)transferred;
+        }
+
+        // ---------- 协议动作 ----------
+
+        /// <summary>握手：写 2048 字节，读 512 字节响应并解析</summary>
+        public static DeviceInfo Handshake(LyDevice dev, int pidHint)
+        {
+            byte[] hs = Ly.BuildHandshake();
+            int w = Write(dev, hs, 0, hs.Length);
+            if (w < 0)
+            {
+                Log.Err("握手写入失败");
+                return null;
+            }
+            byte[] resp = new byte[512];
+            int r = Read(dev, resp, 2000);
+            if (r <= 0)
+            {
+                Log.Err("握手没有读到响应（返回 {0}）", r);
+                return null;
+            }
+            DeviceInfo info = Ly.ParseHandshakeResponse(resp, pidHint);
+            if (info == null)
+            {
+                Log.Err("握手响应校验失败：[0]=0x{0:X2} [1]=0x{0:X2} [8]=0x{0:X2}（读了 {1} 字节）",
+                    resp[0], resp[1], resp[8], r);
+                return null;
+            }
+            Log.W("握手成功：{0}", info.ToString());
+            return info;
+        }
+
+        /// <summary>推一帧 JPEG：分块 → 4096 字节一次写 → 读 ACK</summary>
+        public static bool PushJpeg(LyDevice dev, byte[] jpeg, int pid, out string ack)
+        {
+            ack = "";
+            if (jpeg == null || jpeg.Length == 0)
+            {
+                ack = "空帧";
+                return false;
+            }
+            if (jpeg.Length > Ly.MaxJpegSize)
+            {
+                ack = string.Format("JPEG 过大（{0} > {1}）", jpeg.Length, Ly.MaxJpegSize);
+                return false;
+            }
+
+            byte[] stream = Ly.BuildChunkStream(jpeg, pid);
+            byte[][] writes = Ly.WriteChunks(stream, pid);
+            for (int i = 0; i < writes.Length; i++)
+            {
+                int n = Write(dev, writes[i], 0, writes[i].Length);
+                if (n < 0)
+                {
+                    ack = string.Format("第 {0}/{1} 次写失败", i + 1, writes.Length);
+                    return false;
+                }
+            }
+
+            byte[] resp = new byte[512];
+            int t0 = Environment.TickCount;
+            int r = Read(dev, resp, 1500);
+            int ackMs = Environment.TickCount - t0;
+            // ACK 耗时是"屏冻住但主机端一切正常"的唯一线索：厂商 C# 在 ACK 超过
+            // 100 ms 时会拆掉并重新握手（trcc-linux issue #251）。这里只告警不改行为。
+            string slow = (ackMs > AckSlowThresholdMs)
+                ? string.Format("  ⚠ ACK 耗时 {0} ms，超过厂商的 {1} ms 门槛（C# 在此会重新握手）",
+                                ackMs, AckSlowThresholdMs)
+                : "";
+            if (r > 0)
+            {
+                if (resp[0] == 0x03 && resp[1] == 0xFF)
+                {
+                    ack = string.Format("OK（{0} 字节 / {1} ms，{2} 次写）{3}", r, ackMs, writes.Length, slow);
+                    return true;
+                }
+                ack = string.Format("响应异常 [0]=0x{0:X2} [1]=0x{1:X2}（{2} 字节 / {3} ms）",
+                                    resp[0], resp[1], r, ackMs);
+                return true;
+            }
+            // 未读到 ACK：帧很可能已被固件接受（数据是分块写进去的），但少了同步点，
+            // 不当作干净的成功 —— 调用方据此可以把这帧记进异常计数。
+            ack = string.Format("已写入 {0} 次，{1} ms 内未读到 ACK", writes.Length, ackMs);
+            return false;
+        }
+
+        /// <summary>诊断报告：不需要设备存在也能跑（用于在没插屏的机器上验证枚举路径）</summary>
+        public static string ProbeReport()
+        {
+            StringBuilder sb = new StringBuilder();
+            List<DeviceRef> all = Enumerate();
+            sb.AppendLine(string.Format("USB 设备接口共 {0} 个", all.Count));
+            int ours = 0;
+            for (int i = 0; i < all.Count; i++)
+            {
+                DeviceRef d = all[i];
+                bool isOurs = (d.Vid == Ly.VendorId && (d.Pid == Ly.PidLy || d.Pid == Ly.PidLy1));
+                if (isOurs) ours++;
+                if (isOurs || i < 12)
+                {
+                    sb.AppendLine(string.Format("  {0}VID=0x{1:X4} PID=0x{2:X4}  {3}",
+                        isOurs ? "* " : "  ", d.Vid, d.Pid, d.HardwareId));
+                    // 我们的设备一定要打出接口路径 —— 这是判断 GUID 选得对不对的唯一依据
+                    if (isOurs) sb.AppendLine(string.Format("      路径={0}", d.Path));
+                }
+            }
+            if (ours == 0)
+            {
+                sb.AppendLine(string.Format("结论：没找到利民 LY 屏（VID=0x{0:X4} PID=0x{1:X4}/0x{2:X4}）",
+                    Ly.VendorId, Ly.PidLy, Ly.PidLy1));
+                LyDevice any = Open(Ly.VendorId, 0);
+                sb.AppendLine(any == null ? "按 VID 打开：无设备" : "按 VID 打开：成功（竟然有设备）");
+                if (any != null) any.Dispose();
+            }
+            else
+            {
+                LyDevice dev = Open(Ly.VendorId, 0);
+                if (dev == null)
+                {
+                    sb.AppendLine("结论：看到了设备但打开失败（驱动/权限问题，详见日志）");
+                    sb.AppendLine("  错误码对照：6=ERROR_INVALID_HANDLE（该路径不是 WinUSB 设备接口，"
+                                  + "或 WinUSB 未绑到这块设备）；5=ERROR_ACCESS_DENIED（被别的进程占用）");
+                    sb.AppendLine("  先看日志里『设备路径』那一行：正常应是 "
+                                  + "\\\\?\\usb#vid_0416&pid_5408#...#{a5dcbf10-6530-11d2-901f-00c04fb951ed}");
+                }
+                else
+                {
+                    sb.AppendLine("结论：设备打开成功");
+                    sb.AppendLine(string.Format("  路径={0}", dev.Path));
+                    sb.AppendLine(string.Format("  接口={0} 端点={1} OUT=0x{2:X2} IN={3} 最大包={4}",
+                        dev.InterfaceNumber, dev.Endpoints, dev.PipeOut,
+                        dev.HasIn ? string.Format("0x{0:X2}", dev.PipeIn) : "(无)", dev.OutMaxPacket));
+                    dev.Dispose();
+                }
+            }
+            string text = sb.ToString();
+            Log.W("──── USB 探测 ────");
+            Log.W(text.TrimEnd());
+            return text;
+        }
+    }
+}

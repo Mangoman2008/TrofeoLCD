@@ -1,0 +1,55 @@
+{
+  "app": {
+    "signingConfigs": [
+      {
+        "name": "default",
+        "material": {
+          "storePassword": "000000205ABF79881ABEA568A5BB85B40762EC708238AC9A2595FAEA5E93A634233ED646BF3EBCCCD5C764D934F9B046",
+          "certpath": "/storage/Users/currentUser/.ohos/config/default_TrofeoLCDKZ85lRDAN4kJB9t2Gf_pSwcuvwvd_VpyHZm2K6oHmUY.cer",
+          "keyAlias": "debugKey",
+          "keyPassword": "000000205ABF79881ABEA568A5BB85B40762EC708238AC9A2595FAEA5E93A634233ED646BF3EBCCCD5C764D934F9B046",
+          "profile": "/storage/Users/currentUser/.ohos/config/default_TrofeoLCDKZ85lRDAN4kJB9t2Gf_pSwcuvwvd_VpyHZm2K6oHmUY.p7b",
+          "signAlg": "SHA256withECDSA",
+          "storeFile": "/storage/Users/currentUser/.ohos/config/default_TrofeoLCDKZ85lRDAN4kJB9t2Gf_pSwcuvwvd_VpyHZm2K6oHmUY.p12"
+        },
+        "type": "HarmonyOS"
+      }
+    ],
+    "products": [
+      {
+        "name": "default",
+        "compatibleSdkVersion": "5.0.5(17)",
+        "targetSdkVersion": "6.1.0(23)",
+        "runtimeOS": "HarmonyOS",
+        "buildOption": {
+          "strictMode": {
+            "caseSensitiveCheck": true
+          }
+        },
+        "signingConfig": "default"
+      }
+    ],
+    "buildModeSet": [
+      {
+        "name": "debug"
+      },
+      {
+        "name": "release"
+      }
+    ]
+  },
+  "modules": [
+    {
+      "name": "entry",
+      "srcPath": "./entry",
+      "targets": [
+        {
+          "name": "default",
+          "applyToProducts": [
+            "default"
+          ]
+        }
+      ]
+    }
+  ]
+}

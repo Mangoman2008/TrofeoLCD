@@ -1,0 +1,1062 @@
+<!DOCTYPE html>
+<!--
+  console.html —— TrofeoLCD 可视化 Agent 控制台（前端，单文件、零外部依赖）
+
+  ★ 这份页面只由 bridge/console-server.mjs 提供（单一宿主），
+    所以**不**参与 tools/make_web.py 的"一份模板注入两个宿主"机制
+    （那套是为了 web/preview.html 在鸿蒙 FrameServer.ets 与 Windows MiniHttp.cs 之间不走样）。
+
+  数据：/api/stream（SSE，1s）→ 状态 + 时间线；/api/frame.jpg → 副屏实时画面
+  操作：/api/app/set → 代理到 App 的 /set（主题 / 背景 / 档位 / 开关）
+-->
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<title>Agent 控制台 · TrofeoLCD</title>
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<style>
+  /* ═══════════════════════════════════════════════════════════════
+     光纤导线视觉（fiber / wireframe）
+       · 底色近黑，所有"卡片"退成 1px 线框 + 角标，不用填充块
+       · 主视觉是**线**：会话 → 工具 → 编码 → USB → 屏 的信号链路，
+         线上有流动的光点（数据在走）；时间线是一根竖直光纤，
+         每个事件是线上的一个节点，正在执行的那个节点在呼吸
+       · 配色按"光纤色谱"：青→紫为主，绿=完成，琥珀=进行中，红=出错
+     ═══════════════════════════════════════════════════════════════ */
+  :root{
+    --bg:#04070C; --void:#020407;
+    --wire:#1b2b3a; --wire2:#0e1a24; --wire-hi:#2d4f6b;
+    --text:#cfe3f2; --dim:#7d93a8; --dim2:#54708a;
+    --fiber:#39d0ff; --fiber2:#8b5cff; --fiber3:#5ef2a0;
+    --green:#5ef2a0; --blue:#39d0ff; --blue2:#7fe3ff; --purple:#a06bff;
+    --red:#ff5f56; --amber:#ffc247; --teal:#3ff0d8; --pink:#ff6fd8;
+    --mono:ui-monospace,SFMono-Regular,"JetBrains Mono",Menlo,Consolas,monospace;
+    --glow:0 0 6px;
+  }
+  *{box-sizing:border-box}
+  html,body{height:100%}
+  body{
+    margin:0;color:var(--text);overflow:hidden;
+    background:
+      /* 极细网格 + 两团冷光，像机架里的背光 */
+      linear-gradient(#0a1420 1px,transparent 1px) 0 0/100% 34px,
+      linear-gradient(90deg,#0a1420 1px,transparent 1px) 0 0/34px 100%,
+      radial-gradient(900px 320px at 12% -8%,#0b2b3d 0%,transparent 62%),
+      radial-gradient(800px 340px at 92% 4%,#1a1136 0%,transparent 58%),
+      linear-gradient(180deg,#04070c,#020407);
+    font:13px/1.5 -apple-system,"HarmonyOS Sans SC","Noto Sans CJK SC",system-ui,sans-serif;
+  }
+  .app{height:100vh;display:grid;grid-template-columns:392px minmax(0,1fr) 412px;grid-template-rows:auto minmax(0,1fr);gap:10px;padding:10px}
+
+  /* ── 顶栏：一条带流动光的信号母线 ── */
+  header{grid-column:1/4;position:relative;display:flex;align-items:center;gap:10px;flex-wrap:wrap;
+    padding:9px 13px;border:1px solid var(--wire);border-radius:3px;
+    background:linear-gradient(180deg,#071019e6,#04081099);
+    box-shadow:inset 0 1px 0 #1d3446, 0 0 24px #0a2a3a4d}
+  header::before,header::after{content:"";position:absolute;width:9px;height:9px;border:1px solid var(--fiber);opacity:.75}
+  header::before{left:-1px;top:-1px;border-right:0;border-bottom:0}
+  header::after{right:-1px;bottom:-1px;border-left:0;border-top:0}
+  .brand{display:flex;align-items:baseline;gap:9px;font-weight:600;letter-spacing:1.2px}
+  .brand b{color:#eaf7ff;font-size:15px;text-shadow:var(--glow) #39d0ff88}
+  .brand span{color:var(--dim2);font-size:10.5px;font-family:var(--mono);letter-spacing:.6px}
+  .chip{display:inline-flex;align-items:center;gap:6px;padding:3px 10px;font-size:11.5px;color:var(--dim);
+    border:1px solid var(--wire);border-radius:2px;background:#04080c99;
+    max-width:330px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+  .chip b{color:var(--blue2);font-weight:500;overflow:hidden;text-overflow:ellipsis}
+  .spacer{flex:1}
+  .state{display:inline-flex;align-items:center;gap:7px;padding:4px 12px;font-weight:600;font-size:12px;
+    border:1px solid;border-radius:2px;letter-spacing:.5px}
+  .state .dot{width:7px;height:7px;border-radius:50%}
+  .state.busy{color:var(--amber);border-color:#5c4410;background:#1a1305}
+  .state.busy .dot{background:var(--amber);box-shadow:var(--glow) var(--amber);animation:breathe 1.1s ease-in-out infinite}
+  .state.waiting{color:var(--green);border-color:#14513a;background:#04170f}
+  .state.waiting .dot{background:var(--green);box-shadow:var(--glow) var(--green);animation:blink 1.4s ease-in-out infinite}
+  .state.idle{color:var(--dim);border-color:var(--wire)}
+  .state.idle .dot{background:var(--dim2)}
+  .state.error{color:#ff9c94;border-color:#5c1c18;background:#1c0806}
+  .state.error .dot{background:var(--red);box-shadow:var(--glow) var(--red)}
+  @keyframes breathe{0%,100%{opacity:1;transform:scale(1)}50%{opacity:.3;transform:scale(.7)}}
+  @keyframes blink{0%,100%{opacity:1}50%{opacity:.2}}
+  .conn{display:inline-flex;align-items:center;gap:6px;font-size:11px;color:var(--dim)}
+  .conn .led{width:6px;height:6px;border-radius:50%;background:var(--fiber);box-shadow:var(--glow) var(--fiber)}
+  .conn.off .led{background:var(--red);box-shadow:var(--glow) var(--red)}
+  .clock{font-family:var(--mono);font-size:13px;color:var(--blue2);text-shadow:var(--glow) #39d0ff66}
+
+  /* ── 三列 ── */
+  .col{display:flex;flex-direction:column;gap:10px;min-height:0;overflow-y:auto;overflow-x:hidden;padding-right:2px}
+  .col::-webkit-scrollbar,.timeline::-webkit-scrollbar{width:6px}
+  .col::-webkit-scrollbar-thumb,.timeline::-webkit-scrollbar-thumb{background:#17303f;border-radius:0}
+  .col::-webkit-scrollbar-track,.timeline::-webkit-scrollbar-track{background:#04080c}
+
+  /* ── 线框卡片：靠 1px 线 + 四角标记，不靠填充 ── */
+  .card{position:relative;flex:none;border:1px solid var(--wire);border-radius:3px;
+    background:linear-gradient(180deg,#061019cc,#04080c66);backdrop-filter:blur(1px)}
+  .card::before,.card::after{content:"";position:absolute;width:8px;height:8px;border:1px solid var(--wire-hi);pointer-events:none}
+  .card::before{left:-1px;top:-1px;border-right:0;border-bottom:0}
+  .card::after{right:-1px;bottom:-1px;border-left:0;border-top:0}
+  .card>h3{position:relative;margin:0;padding:7px 11px;font-size:11.5px;font-weight:600;letter-spacing:1.1px;
+    color:#d8ecfb;border-bottom:1px solid var(--wire);display:flex;align-items:center;gap:8px;text-transform:none}
+  .card>h3::after{content:"";position:absolute;left:0;right:0;bottom:-1px;height:1px;
+    background:linear-gradient(90deg,transparent,var(--fiber) 22%,var(--fiber2) 62%,transparent);
+    opacity:.55;animation:scan 6s linear infinite;background-size:220% 100%}
+  @keyframes scan{0%{background-position:120% 0}100%{background-position:-120% 0}}
+  .card>h3 .tag{margin-left:auto;font-size:10.5px;color:var(--dim2);font-weight:400;font-family:var(--mono);letter-spacing:.4px}
+  .body{padding:10px 11px}
+  .row{display:flex;align-items:center;gap:8px;margin:5px 0}
+  .row .k{color:var(--dim2);font-size:11px;min-width:74px;flex:none;letter-spacing:.4px}
+  .row .v{color:var(--text);font-size:12px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+  .mono{font-family:var(--mono)}
+  .num{font-family:var(--mono);font-variant-numeric:tabular-nums}
+  .muted{color:var(--dim)}
+  .small{font-size:11px}
+  .big{font-size:19px;font-weight:600;color:#eaf7ff;font-family:var(--mono);text-shadow:var(--glow) #39d0ff55}
+
+  /* ── 进度条 = 一根光纤（两端发亮，中间是填充的光） ── */
+  .bar{height:6px;border:1px solid var(--wire2);border-radius:1px;background:#020508;overflow:hidden;position:relative}
+  .bar>i{display:block;height:100%;width:0;background:linear-gradient(90deg,#0d6d8f,var(--fiber));
+    box-shadow:0 0 8px #39d0ffaa;transition:width .5s ease}
+  .bar.ok>i{background:linear-gradient(90deg,#0f7a52,var(--green));box-shadow:0 0 8px #5ef2a0aa}
+  .bar.warn>i{background:linear-gradient(90deg,#8a6108,var(--amber));box-shadow:0 0 8px #ffc247aa}
+  .bar.bad>i{background:linear-gradient(90deg,#8a1b16,var(--red));box-shadow:0 0 8px #ff5f56aa}
+
+  .grid2{display:grid;grid-template-columns:1fr 1fr;gap:7px}
+  .kv{border:1px solid var(--wire2);border-left:1px solid var(--fiber);border-radius:2px;padding:5px 8px;background:#03070b}
+  .kv .k{font-size:10px;color:var(--dim2);letter-spacing:.5px}
+  .kv .v{font-size:14px;font-family:var(--mono);color:#eaf7ff}
+
+  /* ── 按钮：线框，悬停才亮 ── */
+  button{font:inherit;font-size:11.5px;color:var(--dim);background:#050b11;border:1px solid var(--wire);
+    border-radius:2px;padding:5px 9px;cursor:pointer;transition:.14s;letter-spacing:.3px}
+  button:hover{color:#eaf7ff;border-color:var(--fiber);box-shadow:0 0 10px #39d0ff44,inset 0 0 10px #39d0ff14}
+  button:active{transform:translateY(1px)}
+  button.on{color:#04140c;background:linear-gradient(180deg,var(--green),#2fd07f);border-color:var(--green);box-shadow:0 0 12px #5ef2a066}
+  button.blue{color:var(--blue2);border-color:#1d4c66}
+  button.purple{color:#c9a8ff;border-color:#3d2a63}
+  button.warnb{color:var(--amber);border-color:#5c4410}
+  button.danger{color:#ff9c94;border-color:#5c1c18}
+  button[disabled]{opacity:.4;cursor:not-allowed}
+  select,textarea,input{font:inherit;color:var(--text);background:#03070b;border:1px solid var(--wire);
+    border-radius:2px;padding:6px 8px;width:100%}
+  select:focus,textarea:focus{outline:none;border-color:var(--fiber);box-shadow:0 0 10px #39d0ff33}
+  textarea{resize:vertical;min-height:62px;font-family:var(--mono);font-size:12px}
+  .btns{display:flex;gap:6px;flex-wrap:wrap}
+
+  /* ── 主题按钮：小线框块 ── */
+  .themeGrid{display:grid;grid-template-columns:repeat(4,1fr);gap:5px}
+  .themeGrid button{padding:6px 3px;height:42px;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:1px;font-size:10px}
+  .themeGrid button b{font-family:var(--mono);font-size:11px}
+  .themeGrid button s{text-decoration:none;font-size:9.5px;color:var(--dim2);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;max-width:100%}
+
+  /* ── 副屏画面：外面套一圈会流动的光纤 ── */
+  .screen{position:relative;aspect-ratio:1920/462;background:#000;border:1px solid var(--wire-hi);border-radius:2px;overflow:hidden}
+  .screen::after{content:"";position:absolute;inset:0;pointer-events:none;border-radius:2px;
+    box-shadow:inset 0 0 34px #39d0ff22}
+  .screen img{width:100%;height:100%;display:block;object-fit:contain;filter:saturate(1.04)}
+  .screen .off{position:absolute;inset:0;display:none;align-items:center;justify-content:center;
+    color:var(--red);font-size:12px;background:#000c}
+  .screen.down .off{display:flex}
+  .legend{display:flex;gap:9px;flex-wrap:wrap;font-size:10.5px;color:var(--dim2);margin-top:6px;font-family:var(--mono)}
+
+  /* ── 信号链路图（本页的门面：一条从会话到屏的光纤） ── */
+  .flow{width:100%;height:96px;display:block}
+  .flow .wire{fill:none;stroke:#16303f;stroke-width:1.4}
+  .flow .live{fill:none;stroke-width:1.6;stroke-linecap:round;stroke-dasharray:5 13;
+    animation:dash 1.15s linear infinite}
+  .flow .live.c1{stroke:var(--fiber)}
+  .flow .live.c2{stroke:var(--fiber2)}
+  .flow .live.c3{stroke:var(--fiber3)}
+  .flow .live.off{stroke:#25404f;animation:none;stroke-dasharray:2 7}
+  @keyframes dash{to{stroke-dashoffset:-36}}
+  .flow text{font-family:var(--mono);font-size:9px;fill:var(--dim2);letter-spacing:.4px}
+  .flow text.v{fill:#bfe4f7;font-size:9.5px}
+  .flow .nd{fill:#04080c;stroke:var(--wire-hi);stroke-width:1.2}
+  .flow .nd.lit{stroke:var(--fiber);filter:drop-shadow(0 0 4px #39d0ffcc)}
+  .flow .nd.ok{stroke:var(--green);filter:drop-shadow(0 0 4px #5ef2a0cc)}
+  .flow .nd.bad{stroke:var(--red);filter:drop-shadow(0 0 4px #ff5f56cc)}
+
+  /* ── 时间线 = 竖直光纤 ── */
+  .center{min-height:0;display:flex;flex-direction:column;gap:10px}
+  .tbar{display:flex;align-items:center;gap:6px;flex-wrap:wrap;padding:7px 10px;
+    border:1px solid var(--wire);border-radius:3px;background:#050b11cc}
+  .chipbtn{background:#04080c;border:1px solid var(--wire);border-radius:2px;padding:3px 10px;font-size:11.5px;color:var(--dim)}
+  .chipbtn.on{color:var(--blue2);border-color:var(--fiber);box-shadow:0 0 10px #39d0ff33,inset 0 0 10px #39d0ff11}
+  .timeline{position:relative;flex:1;min-height:0;overflow-y:auto;padding:10px 10px 10px 34px;
+    border:1px solid var(--wire);border-radius:3px;background:linear-gradient(180deg,#040a0fcc,#02050acc)}
+  /* 那根竖直光纤：静态基线 + 上面流动的光 */
+  .timeline::before{content:"";position:absolute;left:16px;top:0;bottom:0;width:2px;
+    background:linear-gradient(180deg,transparent,#12384c 6%,#1d5f7d 50%,#12384c 94%,transparent)}
+  .timeline::after{content:"";position:absolute;left:16px;top:0;bottom:0;width:2px;
+    background:repeating-linear-gradient(180deg,var(--fiber) 0 10px,transparent 10px 42px);
+    opacity:.85;animation:flow 2.4s linear infinite;filter:drop-shadow(0 0 4px #39d0ffaa)}
+  @keyframes flow{0%{background-position-y:0}100%{background-position-y:52px}}
+  .timeline.paused::after{animation-play-state:paused;opacity:.28}
+
+  .tl{position:relative;display:grid;grid-template-columns:52px 1fr;gap:8px;margin:0 0 7px;
+    padding:6px 9px 6px 10px;border:1px solid var(--wire2);border-left:0;border-radius:0 2px 2px 0;
+    background:linear-gradient(90deg,#050d14cc,#04080c66)}
+  /* 节点：线上一颗珠子，下面一根引入线接到卡片 */
+  .tl::before{content:"";position:absolute;left:-24px;top:13px;width:9px;height:9px;border-radius:50%;
+    background:#04080c;border:1.5px solid var(--wire-hi);transform:translateX(-0.5px)}
+  .tl::after{content:"";position:absolute;left:-15px;top:17px;width:15px;height:1px;
+    background:linear-gradient(90deg,var(--wire-hi),transparent)}
+  .tl .t{font-family:var(--mono);font-size:10.5px;color:var(--dim2);padding-top:2px}
+  .tl .h{display:flex;align-items:center;gap:7px;flex-wrap:wrap}
+  .tl .tag{font-size:10px;font-weight:600;border-radius:1px;padding:1px 6px;border:1px solid;letter-spacing:.5px}
+  .tl .meta{margin-left:auto;font-size:10.5px;color:var(--dim2);font-family:var(--mono);white-space:nowrap}
+  .tl .txt{color:#dcecf8;font-size:12.5px;white-space:pre-wrap;word-break:break-word;margin-top:3px}
+  .tl .brief{font-family:var(--mono);font-size:11.5px;color:#a9d8ef;word-break:break-all;margin-top:2px}
+  .tl pre{margin:5px 0 0;padding:7px 9px;background:#02050a;border:1px solid var(--wire2);border-left:1px solid var(--wire-hi);
+    border-radius:2px;font-family:var(--mono);font-size:11px;color:#9fb6c8;white-space:pre-wrap;word-break:break-word;max-height:320px;overflow:auto}
+  .tl details summary{cursor:pointer;color:var(--dim2);font-size:11px;margin-top:3px;list-style:none}
+  .tl details summary::-webkit-details-marker{display:none}
+  .tl details summary::before{content:"▸ ";color:var(--fiber)}
+  .tl details[open] summary::before{content:"▾ "}
+  /* 各类型的节点色（= 光纤色谱） */
+  .tl.user{border-color:#1d4c66}
+  .tl.user::before{border-color:var(--fiber);box-shadow:0 0 8px #39d0ffaa}
+  .tl.user::after{background:linear-gradient(90deg,var(--fiber),transparent)}
+  .tl.user .tag{color:var(--blue2);border-color:#1d4c66;background:#04141f}
+  .tl.assistant{border-color:#14513a}
+  .tl.assistant::before{border-color:var(--green);box-shadow:0 0 8px #5ef2a0aa}
+  .tl.assistant::after{background:linear-gradient(90deg,var(--green),transparent)}
+  .tl.assistant .tag{color:var(--green);border-color:#14513a;background:#04170f}
+  .tl.reasoning{border-color:#31215a;background:linear-gradient(90deg,#0b0718cc,#04080c66)}
+  .tl.reasoning::before{border-color:var(--purple);box-shadow:0 0 8px #a06bffaa}
+  .tl.reasoning::after{background:linear-gradient(90deg,var(--purple),transparent)}
+  .tl.reasoning .tag{color:#c9a8ff;border-color:#3d2a63;background:#0d0820}
+  .tl.tool{border-color:#17475f}
+  .tl.tool::before{border-color:var(--fiber);box-shadow:0 0 8px #39d0ff88}
+  .tl.tool::after{background:linear-gradient(90deg,var(--fiber),transparent)}
+  .tl.tool .tag{color:var(--blue2);border-color:#17475f;background:#04141f}
+  /* 正在跑的工具有一颗"在跳"的节点 */
+  .tl.tool.running{background:linear-gradient(90deg,#1a130599,#04080c66);border-color:#5c4410}
+  .tl.tool.running::before{border-color:var(--amber);background:var(--amber);
+    box-shadow:0 0 12px var(--amber);animation:breathe 1s ease-in-out infinite}
+  .tl.tool.running::after{background:linear-gradient(90deg,var(--amber),transparent)}
+  .tl.tool.running .tag{color:var(--amber);border-color:#5c4410;background:#1a1305}
+  .tl.todo{border-color:#31215a}
+  .tl.todo::before{border-color:var(--fiber2);box-shadow:0 0 8px #8b5cffaa}
+  .tl.todo::after{background:linear-gradient(90deg,var(--fiber2),transparent)}
+  .tl.todo .tag{color:#c9a8ff;border-color:#3d2a63;background:#0d0820}
+  .tl.turn{border-color:#12202b;background:#03070a}
+  .tl.turn::before{border-color:#24404f}
+  .tl.turn::after{background:linear-gradient(90deg,#24404f,transparent)}
+  .tl.turn .tag{color:var(--dim2);border-color:#12202b;background:#050b11}
+  .tl.turn.err{border-color:#5c1c18}
+  .tl.turn.err::before{border-color:var(--red);box-shadow:0 0 8px #ff5f56aa}
+  .tl.turn.err .tag{color:#ff9c94;border-color:#5c1c18;background:#1c0806}
+  .tl.title{border-color:#14514c}
+  .tl.title::before{border-color:var(--teal);box-shadow:0 0 8px #3ff0d8aa}
+  .tl.title .tag{color:var(--teal);border-color:#14514c;background:#03191a}
+  .tl.compact{border-color:#5c4410}
+  .tl.compact::before{border-color:var(--amber)}
+  .tl.compact .tag{color:var(--amber);border-color:#5c4410;background:#1a1305}
+  .empty{color:var(--dim2);text-align:center;padding:26px 0;font-size:12px}
+
+  .composer{padding:9px 10px;border:1px solid var(--wire);border-radius:3px;background:#050b11cc}
+  .composer .note{font-size:11px;color:var(--dim2);margin:6px 0 0}
+  .composer .note b{color:var(--amber);font-weight:500}
+
+  /* ── 静态快照横幅 ── */
+  .banner{grid-column:1/4;display:flex;align-items:center;gap:8px;padding:6px 11px;font-size:11.5px;color:var(--amber);
+    border:1px solid #5c4410;border-left:3px solid var(--amber);border-radius:2px;background:#1a130599}
+  .banner b{color:#eaf7ff;font-family:var(--mono)}
+
+  .toast{position:fixed;right:14px;bottom:14px;display:flex;flex-direction:column;gap:6px;z-index:50}
+  .toast div{padding:7px 12px;font-size:12px;max-width:420px;color:var(--text);
+    background:#050b11ee;border:1px solid var(--wire);border-left:2px solid var(--green);border-radius:2px;
+    box-shadow:0 6px 24px #000a,0 0 18px #5ef2a022}
+  .toast div.err{border-left-color:var(--red);box-shadow:0 6px 24px #000a,0 0 18px #ff5f5622}
+
+  /* ── 小时柱：改成细光柱 ── */
+  .bars{display:flex;align-items:flex-end;gap:2px;height:48px;margin-top:6px}
+  .bars i{flex:1;min-height:1px;background:linear-gradient(180deg,var(--fiber),#0a3a4d);
+    border-radius:0;box-shadow:0 0 6px #39d0ff55}
+  .bars i.now{background:linear-gradient(180deg,var(--fiber2),#3a1f6b);box-shadow:0 0 8px #8b5cff88}
+  .barsx{display:flex;justify-content:space-between;font-size:9.5px;color:var(--dim2);font-family:var(--mono);margin-top:2px}
+
+  /* ── 待办：每条前面一小段导线 ── */
+  .todo{display:flex;gap:7px;align-items:flex-start;padding:3px 0 3px 8px;font-size:12px;position:relative}
+  .todo::before{content:"";position:absolute;left:0;top:9px;width:4px;height:1px;background:var(--wire-hi)}
+  .todo .ic{width:13px;flex:none;text-align:center;font-size:10px}
+  .todo.completed{color:var(--dim2);text-decoration:line-through}
+  .todo.completed .ic{color:var(--green)}
+  .todo.in_progress{color:#eaf7ff}
+  .todo.in_progress::before{width:8px;background:var(--amber);box-shadow:0 0 6px var(--amber)}
+  .todo.in_progress .ic{color:var(--amber);animation:breathe 1.2s ease-in-out infinite}
+  .todo.pending .ic{color:var(--dim2)}
+
+  /* ── 工具分布：横条也是光纤 ── */
+  .toolbars{display:flex;flex-direction:column;gap:5px;margin-top:2px}
+  .toolbars .tb{display:grid;grid-template-columns:96px 34px 1fr;gap:6px;align-items:center;font-size:11px}
+  .toolbars .tb .n{color:var(--dim);font-family:var(--mono);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+  .toolbars .tb .c{font-family:var(--mono);text-align:right;color:var(--blue2)}
+  .toolbars .tb .b{height:4px;background:#020508;border:1px solid var(--wire2);overflow:hidden}
+  .toolbars .tb .b>i{display:block;height:100%;background:linear-gradient(90deg,#3a1f6b,var(--fiber2));box-shadow:0 0 6px #8b5cff88}
+
+  .spark{width:100%;height:42px;display:block;margin-top:4px}
+  .files{font-family:var(--mono);font-size:10.5px;color:var(--dim2);word-break:break-all}
+</style>
+</head>
+<body>
+<div class="app">
+  <header>
+    <div class="brand"><b>AGENT CONSOLE</b><span>TrofeoLCD · DeepSeek Harness</span></div>
+    <span class="chip" id="c-project">项目 <b>—</b></span>
+    <span class="chip" id="c-title">会话 <b>—</b></span>
+    <span class="chip" id="c-model">模型 <b>—</b></span>
+    <span class="state idle" id="state"><i class="dot"></i><span>连接中…</span></span>
+    <span class="spacer"></span>
+    <span class="chip" id="c-screen">副屏 <b>—</b></span>
+    <span class="chip" id="c-bridge">遥测 <b>—</b></span>
+    <span class="conn" id="conn"><i class="led"></i><span>SSE</span></span>
+    <span class="clock" id="clock">--:--:--</span>
+  </header>
+
+  <!-- ══════════ 左列：会话 / 状态 / 副屏 / 控制 ══════════ -->
+  <div class="col">
+    <div class="card">
+      <h3>会话<span class="tag" id="sess-count"></span></h3>
+      <div class="body">
+        <select id="sessSel"></select>
+        <div class="btns" style="margin-top:7px">
+          <button id="followBtn" class="on">跟随最新</button>
+          <button id="reloadBtn">刷新列表</button>
+        </div>
+        <div class="files" id="sessFile" style="margin-top:7px"></div>
+      </div>
+    </div>
+
+    <div class="card">
+      <h3>当前状态<span class="tag" id="agent-turn"></span></h3>
+      <div class="body">
+        <div class="row"><span class="k">正在做</span><span class="v" id="a-activity">—</span></div>
+        <div class="row"><span class="k">工具</span><span class="v mono" id="a-tool">—</span></div>
+        <div class="row"><span class="k">最后回复</span><span class="v" id="a-last" title="">—</span></div>
+        <div style="margin-top:9px">
+          <div class="row" style="margin:0 0 4px"><span class="k" style="min-width:auto">上下文占用</span>
+            <span class="v num" id="a-ctx" style="margin-left:auto">—</span></div>
+          <div class="bar" id="ctxBar"><i></i></div>
+        </div>
+        <div class="grid2" style="margin-top:9px">
+          <div class="kv"><div class="k">今日输入</div><div class="v" id="a-in">0</div></div>
+          <div class="kv"><div class="k">今日输出</div><div class="v" id="a-out">0</div></div>
+          <div class="kv"><div class="k">今日合计</div><div class="v" id="a-total">0</div></div>
+          <div class="kv"><div class="k">速率 / 分钟</div><div class="v" id="a-rate">0</div></div>
+        </div>
+      </div>
+    </div>
+
+    <div class="card">
+      <h3>副屏画面<span class="tag" id="scr-tag"></span></h3>
+      <div class="body">
+        <div class="screen" id="screen">
+          <img id="frame" alt="副屏画面">
+          <div class="off">副屏不可达（App 未运行或端口未监听）</div>
+        </div>
+        <div class="legend">
+          <span id="scr-size">—</span><span id="scr-bytes"></span><span id="scr-sent"></span><span id="scr-fps"></span><span id="scr-dev"></span>
+        </div>
+      </div>
+    </div>
+
+    <div class="card">
+      <h3>副屏控制<span class="tag">经 App 的 /set</span></h3>
+      <div class="body">
+        <div class="small muted" style="margin-bottom:5px">主题（点一下即切）</div>
+        <div class="themeGrid" id="themeGrid"></div>
+        <div class="small muted" style="margin:10px 0 5px">背景特效</div>
+        <div class="btns" id="bgRow"></div>
+        <div class="small muted" style="margin:10px 0 5px">速度 / 画质档位</div>
+        <div class="btns" id="profRow"></div>
+        <div class="small muted" style="margin:10px 0 5px">开关与版面</div>
+        <div class="btns" id="swRow"></div>
+      </div>
+    </div>
+  </div>
+
+  <!-- ══════════ 中列：Agent 时间线 ══════════ -->
+  <div class="center">
+    <div class="tbar">
+      <span class="small muted">过滤</span>
+      <button class="chipbtn on" data-f="all">全部</button>
+      <button class="chipbtn" data-f="tool">工具</button>
+      <button class="chipbtn" data-f="assistant">回复</button>
+      <button class="chipbtn" data-f="reasoning">思考</button>
+      <button class="chipbtn" data-f="user">指令</button>
+      <button class="chipbtn" data-f="todo">待办</button>
+      <button class="chipbtn" data-f="turn">轮次</button>
+      <span class="spacer"></span>
+      <span class="small muted" id="tl-count"></span>
+      <button class="chipbtn on" id="autoBtn">自动滚动</button>
+      <button class="chipbtn" id="expandBtn">展开详情</button>
+    </div>
+    <div class="timeline" id="timeline"><div class="empty">等待数据…</div></div>
+    <div class="composer">
+      <textarea id="cmd" placeholder="给 Agent 的指令（当前版本不会注入正在运行的会话，先落收件箱或复制到 DSH 输入框）"></textarea>
+      <div class="btns" style="margin-top:7px">
+        <button class="blue" id="copyBtn">复制指令</button>
+        <button class="purple" id="inboxBtn">存入收件箱</button>
+        <button id="dshBtn">打开 DSH 界面</button>
+        <span class="small muted" id="inboxNote" style="align-self:center"></span>
+      </div>
+      <div class="note">为什么要存收件箱：<b>外部进程无法把消息注入 DSH 的活跃会话</b>（DSH 的 HTTP 面只有页面与静态资源，会话走内部 RPC）。收件箱落在
+        <span class="mono">~/.dsh/storages/lcd-console/inbox.jsonl</span>，等控制台升级成 DSH 进程内插件后即可直接投递。</div>
+    </div>
+  </div>
+
+  <!-- ══════════ 右列：待办 / 用量 / 系统 / 工具 / 环境 ══════════ -->
+  <div class="col">
+    <div class="card">
+      <h3>任务进度<span class="tag" id="todo-tag"></span></h3>
+      <div class="body">
+        <div class="bar" id="todoBar" style="margin-bottom:8px"><i></i></div>
+        <div id="todoList"><div class="empty small">还没有 todo/write</div></div>
+      </div>
+    </div>
+
+    <div class="card">
+      <h3>用量与上下文<span class="tag" id="usage-src"></span></h3>
+      <div class="body">
+        <div class="row"><span class="k">今日合计</span><span class="v num" id="u-total" style="font-size:15px;color:#fff">0</span></div>
+        <div class="row"><span class="k">输入 / 输出</span><span class="v num" id="u-io">0 / 0</span></div>
+        <div class="row"><span class="k">本会话累计</span><span class="v num" id="u-sess">—</span></div>
+        <div class="small muted" style="margin-top:8px">今日按小时（token）</div>
+        <div class="bars" id="hourly"></div>
+        <div class="barsx"><span>0</span><span>6</span><span>12</span><span>18</span><span>23</span></div>
+      </div>
+    </div>
+
+    <div class="card">
+      <h3>本机<span class="tag" id="sys-host"></span></h3>
+      <div class="body">
+        <div class="grid2">
+          <div class="kv"><div class="k">CPU</div><div class="v" id="sys-cpu">—</div></div>
+          <div class="kv"><div class="k">内存</div><div class="v" id="sys-mem">—</div></div>
+        </div>
+        <canvas class="spark" id="spark" width="380" height="40"></canvas>
+        <div class="row small muted" style="justify-content:space-between">
+          <span id="sys-load">负载 —</span><span id="sys-up">—</span>
+        </div>
+      </div>
+    </div>
+
+    <div class="card">
+      <h3>工具分布<span class="tag" id="tool-tag"></span></h3>
+      <div class="body"><div class="toolbars" id="toolbars"><div class="empty small">等待全量统计…</div></div></div>
+    </div>
+
+    <div class="card">
+      <h3>环境与链路<span class="tag" id="env-tag"></span></h3>
+      <div class="body">
+        <div class="row"><span class="k">副屏自检</span><span class="v" id="env-selftest">—</span></div>
+        <div class="row"><span class="k">USB</span><span class="v" id="env-usb">—</span></div>
+        <div class="row"><span class="k">账户余额</span><span class="v" id="env-balance">—</span></div>
+        <div class="row"><span class="k">打印机</span><span class="v" id="env-printer">—</span></div>
+        <div class="row"><span class="k">会话轮次</span><span class="v num" id="env-turns">—</span></div>
+        <div class="row"><span class="k">全量统计</span><span class="v num" id="env-stats">—</span></div>
+        <div class="files" id="env-cwd" style="margin-top:6px"></div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<div class="toast" id="toast"></div>
+
+<script>
+/* ───────────── 小工具 ───────────── */
+const $ = (id) => document.getElementById(id)
+const esc = (s) => String(s ?? '').replace(/[&<>"']/g, (c) => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]))
+const fmtTok = (n) => {
+  n = Number(n) || 0
+  if (n >= 1e8) return (n / 1e8).toFixed(2) + ' 亿'
+  if (n >= 1e4) return (n / 1e4).toFixed(1) + ' 万'
+  return String(n)
+}
+const fmtBytes = (n) => {
+  n = Number(n) || 0
+  if (n < 1024) return n + ' B'
+  if (n < 1048576) return (n / 1024).toFixed(1) + ' KB'
+  return (n / 1048576).toFixed(2) + ' MB'
+}
+const hhmmss = (ts) => {
+  if (!ts) return ''
+  const d = new Date(ts)
+  const p = (n) => String(n).padStart(2, '0')
+  return p(d.getHours()) + ':' + p(d.getMinutes()) + ':' + p(d.getSeconds())
+}
+const ago = (ms) => {
+  if (!ms || ms < 0) return ''
+  const s = Math.round(ms / 1000)
+  if (s < 60) return s + 's'
+  if (s < 3600) return Math.round(s / 60) + 'm'
+  if (s < 86400) return (s / 3600).toFixed(1) + 'h'
+  return Math.round(s / 86400) + 'd'
+}
+function toast(msg, isErr) {
+  const d = document.createElement('div')
+  if (isErr) d.className = 'err'
+  d.textContent = msg
+  $('toast').appendChild(d)
+  setTimeout(() => d.remove(), 4200)
+}
+
+/* ───────────── 常量表（与仓库 docs/主题总表.md 对齐）───────────── */
+const THEMES = [
+  [0, '仪表盘'], [1, '诊断终端'], [2, '监控墙'], [3, '分页屏'],
+  [4, '打砖块'], [5, 'Dotii 分页'], [6, '固件仿真'], [7, '官方浅色'],
+  [8, 'MacTR'], [9, '打印机位Dotii'], [10, '二次元 10'], [11, '二次元 11'],
+  [12, '二次元 12'], [13, '二次元 13'], [14, '二次元 14'], [15, '二次元 15'],
+]
+const BGS = [['none', '无'], ['plasma', '等离子'], ['aurora', '极光'], ['lava', '熔岩'], ['waves', '海浪']]
+const PROFILES = [['speed', '速度档'], ['balanced', '均衡档']]
+const SWITCHES = [
+  { label: '竖屏', key: 'vertical', get: (a) => a.vertical },
+  { label: '流水线推帧', key: 'pipe', get: () => null },
+]
+const PC = ['printer', 'dotii', 'v4', 'v6']
+
+/* ───────────── 状态 ───────────── */
+let SNAP = null
+let filter = 'all'
+let autoScroll = true
+let expandAll = false
+let follow = true
+let lastTheme = null
+let rateState = { at: 0, total: 0, perMin: 0 }
+let frameTimer = null
+let lastTimelineKey = ''
+
+/* ───────────── 时间线渲染 ───────────── */
+const KIND_LABEL = {
+  user: '你的指令', assistant: '回复', tool: '工具', todo: '待办',
+  turn: '轮次', title: '会话标题', compact: '上下文压缩', result: '工具结果',
+}
+
+function rowPass(r) {
+  if (filter === 'all') return true
+  if (filter === 'tool') return r.kind === 'tool' || r.kind === 'result'
+  if (filter === 'reasoning') return r.kind === 'assistant' && r.reasoning
+  if (filter === 'assistant') return r.kind === 'assistant' && r.hasText !== false && r.text
+  return r.kind === filter
+}
+
+function renderRow(r) {
+  const cls = ['tl', r.kind]
+  if (r.kind === 'tool' && r.running) cls.push('running')
+  if (r.kind === 'turn' && r.phase === 'end' && r.reason === 'error') cls.push('err')
+  const head = []
+  head.push('<span class="tag">' + esc(KIND_LABEL[r.kind] || r.kind) + '</span>')
+
+  const meta = []
+  if (r.kind === 'tool') {
+    head.push('<span class="mono" style="color:#9ecbff">' + esc(r.label || r.tool) + '</span>')
+    if (r.running) meta.push('执行中…')
+    else if (r.result && r.result.ms !== undefined) meta.push(r.result.ms + ' ms')
+    if (r.result && r.result.bytes) meta.push(fmtBytes(r.result.bytes))
+  } else if (r.kind === 'assistant') {
+    head.push('<span class="muted small">turn ' + (r.turn ?? '-') + ' / step ' + (r.step ?? '-') + '</span>')
+    if (r.usage) meta.push('in ' + fmtTok(r.usage.input) + ' · out ' + fmtTok(r.usage.output))
+  } else if (r.kind === 'turn') {
+    head.push('<span class="mono">turn ' + (r.turn ?? '-') + '</span>')
+    if (r.phase === 'end') head.push('<span class="small muted">' + (r.reason === 'error' ? '出错结束' : '结束 · ' + esc(r.reason || '')) + '</span>')
+    else head.push('<span class="small muted">开始</span>')
+  } else if (r.kind === 'todo') {
+    head.push('<span class="small">' + r.done + ' / ' + r.total + '</span>')
+  } else if (r.kind === 'user' && r.via === 'inbox') {
+    head.push('<span class="small muted">来自收件箱</span>')
+  }
+
+  let body = ''
+  if (r.kind === 'tool') {
+    body += '<div class="brief">' + esc(r.brief) + '</div>'
+    if (r.detail) body += '<details' + (expandAll ? ' open' : '') + '><summary>参数</summary><pre>' + esc(r.detail) + '</pre></details>'
+    if (r.result && r.result.preview) body += '<details' + (expandAll ? ' open' : '') + '><summary>结果</summary><pre>' + esc(r.result.preview) + '</pre></details>'
+  } else if (r.kind === 'assistant') {
+    if (r.reasoning) body += '<details' + (expandAll ? ' open' : '') + '><summary>思考（' + (r.reasoningLen || r.reasoning.length) + ' 字）</summary><pre>' + esc(r.reasoning) + '</pre></details>'
+    if (r.text) body += '<div class="txt">' + esc(r.text) + '</div>'
+    if (!r.text && !r.reasoning) body += '<div class="small muted">（这一步没有文本输出，直接调用了工具）</div>'
+  } else if (r.kind === 'user') {
+    body += '<div class="txt">' + esc(r.text) + '</div>'
+  } else if (r.kind === 'todo') {
+    body += '<div class="small">' + (r.current ? '正在做：' + esc(r.current) : '待办已更新') + '</div>'
+  } else if (r.kind === 'turn') {
+    if (r.error) body += '<div class="small" style="color:#ff9c94">' + esc(r.error) + '</div>'
+  } else if (r.kind === 'title' || r.kind === 'compact' || r.kind === 'result') {
+    body += '<div class="txt small">' + esc(r.text) + '</div>'
+  }
+
+  return '<div class="' + cls.join(' ') + '" data-i="' + r.i + '">'
+    + '<div class="t">' + hhmmss(r.ts) + '</div><div>'
+    + '<div class="h">' + head.join('') + '<span class="meta">' + meta.join(' · ') + '</span></div>'
+    + body + '</div></div>'
+}
+
+function renderTimeline(rows) {
+  const box = $('timeline')
+  const pass = rows.filter(rowPass)
+  $('tl-count').textContent = pass.length + ' / ' + rows.length + ' 条'
+  const key = pass.map((r) => r.i + (r.running ? 'r' : '') + (r.result ? 'd' : '')).join(',')
+  if (key === lastTimelineKey) {
+    if (autoScroll) box.scrollTop = box.scrollHeight
+    return
+  }
+  lastTimelineKey = key
+  if (!pass.length) {
+    box.innerHTML = '<div class="empty">该过滤下没有内容</div>'
+    return
+  }
+  box.innerHTML = pass.map(renderRow).join('')
+  if (autoScroll) box.scrollTop = box.scrollHeight
+}
+
+/* ───────────── 各面板 ───────────── */
+function renderHeader(s) {
+  const a = s.agent || {}
+  $('c-project').innerHTML = '项目 <b>' + esc(a.project || '—') + '</b>'
+  $('c-title').innerHTML = '会话 <b>' + esc(s.title || (s.session && s.session.sid ? s.session.sid.slice(0, 20) : '—')) + '</b>'
+  $('c-model').innerHTML = '模型 <b>' + esc((a.provider ? a.provider + ' / ' : '') + (a.model || '—')) + '</b>'
+
+  const st = $('state')
+  const state = a.errorText ? 'error' : (a.state || 'idle')
+  st.className = 'state ' + (state === 'busy' ? 'busy' : state === 'waiting' ? 'waiting' : state === 'error' ? 'error' : 'idle')
+  const label = state === 'busy' ? '工作中' : state === 'waiting' ? '等待输入' : state === 'error' ? '出错' : '空闲'
+  st.querySelector('span').textContent = label + (a.activity && state !== 'idle' ? ' · ' + a.activity : '')
+
+  const app = s.app || {}
+  $('c-screen').innerHTML = '副屏 <b>' + (app.online ? esc(app.state || '在线') + (app.usbOpen ? ' · USB✓' : ' · USB✗') : '离线') + '</b>'
+  const bridge = s.lcd
+  $('c-bridge').innerHTML = '遥测 <b>' + (app.online && app.bridgeAgeSec >= 0
+    ? app.bridgeSource + ' · ' + app.bridgeAgeSec + 's 前'
+    : (bridge ? '快照文件 ' + ago(Date.now() - Date.parse(bridge.at || 0)) + ' 前' : '无')) + '</b>'
+}
+
+function renderSession(s) {
+  const act = s.activeSessions || 0
+  $('sess-count').textContent = (s.sessions || []).length + ' 个会话'
+    + (act > 1 ? ' · ' + act + ' 个在 30s 内活跃' : '')
+  const sel = $('sessSel')
+  const cur = s.session && s.session.file
+  const want = (s.sessions || []).map((x) => x.file).join('|') + '#' + cur
+  if (sel.dataset.key !== want) {
+    sel.dataset.key = want
+    sel.innerHTML = (s.sessions || []).map((x) => {
+      const nm = (x.project || '?') + ' · ' + String(x.sid).replace('session-', '').slice(0, 8)
+      const idle = typeof x.idleSec === 'number' ? x.idleSec : Math.round((Date.now() - x.actMs) / 1000)
+      const live = idle < 30 ? '● ' : ''
+      return '<option value="' + esc(x.file) + '"' + (x.file === cur ? ' selected' : '') + '>'
+        + live + esc(nm) + '  ·  ' + fmtBytes(x.size) + '  ·  ' + (idle < 90 ? idle + 's' : Math.round(idle / 60) + 'm') + ' 无活动</option>'
+    }).join('') + '<option value="auto">↻ 跟随最新（自动）</option>'
+  }
+  const sess = s.session
+  $('sessFile').textContent = sess ? sess.file + '  ·  ' + fmtBytes(sess.size) + '  ·  ' + sess.ageSec + 's 前有活动' : '没有找到会话文件'
+}
+
+function renderAgent(s) {
+  const a = s.agent || {}
+  $('agent-turn').textContent = 'turn ' + (a.turn ?? '-') + ' · step ' + (a.step ?? '-')
+  $('a-activity').textContent = a.activity || (a.state === 'idle' ? '空闲' : '—')
+  $('a-tool').textContent = (a.runningTool ? '▶ ' : '') + (a.tool || '—')
+  $('a-tool').style.color = a.runningTool ? '#ffd76e' : ''
+  const last = a.lastText || ''
+  $('a-last').textContent = last ? last.slice(-160) : '—'
+  $('a-last').title = last
+
+  const t = s.tokens || {}
+  const used = t.contextUsed || 0
+  const win = t.contextWindow || 1000000
+  const pct = win ? Math.min(100, (used / win) * 100) : 0
+  $('a-ctx').textContent = fmtTok(used) + ' / ' + fmtTok(win) + '（' + pct.toFixed(1) + '%）'
+  const bar = $('ctxBar')
+  bar.className = 'bar ' + (pct > 85 ? 'bad' : pct > 60 ? 'warn' : 'ok')
+  bar.querySelector('i').style.width = pct + '%'
+
+  $('a-in').textContent = fmtTok(t.todayInput)
+  $('a-out').textContent = fmtTok(t.todayOutput)
+  $('a-total').textContent = fmtTok(t.todayTotal)
+
+  const now = Date.now()
+  if (rateState.at && now - rateState.at > 3000) {
+    const dtMin = (now - rateState.at) / 60000
+    const d = (t.todayTotal || 0) - rateState.total
+    if (dtMin > 0 && d >= 0) rateState.perMin = Math.round(d / dtMin)
+    rateState.at = now
+    rateState.total = t.todayTotal || 0
+  } else if (!rateState.at) {
+    rateState.at = now
+    rateState.total = t.todayTotal || 0
+  }
+  $('a-rate').textContent = fmtTok(rateState.perMin)
+}
+
+function renderScreen(s) {
+  const app = s.app || {}
+  const el = $('screen')
+  el.classList.toggle('down', !app.online)
+  if (!app.online) {
+    $('scr-tag').textContent = '离线'
+    $('scr-size').textContent = app.err ? ('连接失败：' + app.err) : '未连接'
+    $('scr-bytes').textContent = ''
+    $('scr-sent').textContent = ''
+    $('scr-fps').textContent = ''
+    $('scr-dev').textContent = ''
+    return
+  }
+  $('scr-tag').textContent = (app.jpegW || 0) + '×' + (app.jpegH || 0)
+  $('scr-size').textContent = (app.jpegW || 0) + '×' + (app.jpegH || 0)
+  $('scr-bytes').textContent = fmtBytes(app.jpegBytes) + '/帧'
+  $('scr-sent').textContent = '已推 ' + (app.sent || 0) + ' 帧' + (app.errors ? ' · 错 ' + app.errors : '')
+  $('scr-fps').textContent = (app.fps || 0).toFixed(1) + ' fps'
+  $('scr-dev').textContent = app.device || ''
+}
+
+function renderControls(s) {
+  const app = s.app || {}
+  const theme = app.theme ?? 0
+  if (lastTheme !== theme || $('themeGrid').childElementCount === 0) {
+    if ($('themeGrid').childElementCount === 0) {
+      $('themeGrid').innerHTML = THEMES.map(([n, nm]) =>
+        '<button class="th" data-n="' + n + '"><b>' + n + '</b><s>' + esc(nm) + '</s></button>').join('')
+      $('themeGrid').addEventListener('click', (e) => {
+        const b = e.target.closest('button.th')
+        if (b) setApp('theme=' + b.dataset.n, '切到主题 ' + b.dataset.n)
+      })
+      $('bgRow').innerHTML = BGS.map(([k, nm]) => '<button class="bg" data-k="' + k + '">' + nm + '</button>').join('')
+      $('bgRow').addEventListener('click', (e) => {
+        const b = e.target.closest('button.bg')
+        if (b) setApp('background=' + b.dataset.k, '背景 → ' + b.textContent)
+      })
+      $('profRow').innerHTML = PROFILES.map(([k, nm]) => '<button class="pf" data-k="' + k + '">' + nm + '</button>').join('')
+      $('profRow').addEventListener('click', (e) => {
+        const b = e.target.closest('button.pf')
+        if (b) setApp('profile=' + b.dataset.k, '档位 → ' + b.textContent)
+      })
+      $('swRow').innerHTML =
+        '<button class="sw" data-q="vertical">竖屏</button>' +
+        '<button class="sw" data-q="pipe">流水线</button>' +
+        PC.map((k) => '<button class="pc" data-k="' + k + '">格:' + k + '</button>').join('')
+      $('swRow').addEventListener('click', (e) => {
+        const sw = e.target.closest('button.sw')
+        if (sw) {
+          const on = sw.classList.contains('on') ? 0 : 1
+          setApp(sw.dataset.q + '=' + on, sw.textContent + ' → ' + (on ? '开' : '关'))
+          return
+        }
+        const pc = e.target.closest('button.pc')
+        if (pc) setApp('printerCell=' + pc.dataset.k, '打印机格 → ' + pc.dataset.k)
+      })
+    }
+    lastTheme = theme
+  }
+  for (const b of document.querySelectorAll('button.th')) b.classList.toggle('on', Number(b.dataset.n) === theme)
+  const vOn = !!app.vertical
+  for (const b of document.querySelectorAll('button.sw')) {
+    if (b.dataset.q === 'vertical') b.classList.toggle('on', vOn)
+  }
+}
+
+function renderTodos(s) {
+  const list = (s.stats && s.stats.todos && s.stats.todos.length ? s.stats.todos : s.todos) || []
+  const done = list.filter((t) => t.status === 'completed').length
+  $('todo-tag').textContent = list.length ? done + ' / ' + list.length : ''
+  const pct = list.length ? (done / list.length) * 100 : 0
+  const bar = $('todoBar')
+  bar.className = 'bar ' + (pct >= 100 ? 'ok' : '')
+  bar.querySelector('i').style.width = pct + '%'
+  if (!list.length) {
+    $('todoList').innerHTML = '<div class="empty small">还没有 todo/write</div>'
+    return
+  }
+  const ic = { completed: '✔', in_progress: '▶', pending: '○' }
+  $('todoList').innerHTML = list.map((t) => {
+    const stt = ['completed', 'in_progress', 'pending'].includes(t.status) ? t.status : 'pending'
+    return '<div class="todo ' + stt + '"><span class="ic">' + (ic[stt] || '○') + '</span><span>' + esc(t.content || '') + '</span></div>'
+  }).join('')
+}
+
+function renderUsage(s) {
+  const t = s.tokens || {}
+  $('u-total').textContent = fmtTok(t.todayTotal)
+  $('u-io').textContent = fmtTok(t.todayInput) + ' / ' + fmtTok(t.todayOutput)
+  const su = s.stats && s.stats.sessionUsage
+  $('u-sess').textContent = su ? (fmtTok(su.input + su.output) + '（缓存读 ' + fmtTok(su.cacheRead) + '）') : '—'
+  $('usage-src').textContent = s.stats ? '全量 ' + ago(s.stats.ageMs) + ' 前' : '尾部窗口'
+  const h = t.hourly || []
+  const max = Math.max(1, ...h)
+  const nowH = new Date().getHours()
+  $('hourly').innerHTML = h.map((v, i) =>
+    '<i class="' + (i === nowH ? 'now' : '') + '" style="height:' + Math.max(2, (v / max) * 100) + '%" title="' + i + ' 时 · ' + fmtTok(v) + '"></i>').join('')
+}
+
+function renderSystem(s) {
+  const y = s.system || {}
+  $('sys-cpu').textContent = (y.cpu ?? 0).toFixed ? (y.cpu ?? 0).toFixed(1) + '%' : y.cpu + '%'
+  $('sys-mem').textContent = ((y.memUsed || 0) / 1024).toFixed(1) + ' / ' + ((y.memTotal || 0) / 1024).toFixed(0) + ' GB'
+  $('sys-host').textContent = y.host || ''
+  $('sys-load').textContent = '负载 ' + y.load1 + ' / ' + y.load5 + ' / ' + y.load15
+  $('sys-up').textContent = '开机 ' + ago((y.uptimeSec || 0) * 1000)
+  drawSpark(y.cpuHist || [], y.memHist || [], y.memTotal || 1)
+}
+
+function drawSpark(cpu, mem, memTotal) {
+  const cv = $('spark')
+  const ctx = cv.getContext('2d')
+  const W = cv.width, H = cv.height
+  ctx.clearRect(0, 0, W, H)
+  ctx.strokeStyle = '#21262D'
+  ctx.beginPath(); ctx.moveTo(0, H - 0.5); ctx.lineTo(W, H - 0.5); ctx.stroke()
+  if (cpu.length < 2) return
+  const step = W / Math.max(1, cpu.length - 1)
+  const draw = (arr, norm, color) => {
+    ctx.beginPath()
+    arr.forEach((v, i) => {
+      const x = i * step
+      const y = H - Math.min(1, Math.max(0, norm(v))) * (H - 4) - 2
+      i ? ctx.lineTo(x, y) : ctx.moveTo(x, y)
+    })
+    ctx.strokeStyle = color
+    ctx.lineWidth = 1.6
+    ctx.stroke()
+  }
+  draw(cpu, (v) => v / 100, '#3FB950')
+  draw(mem, (v) => v / (memTotal || 1), '#1F6FEB')
+}
+
+function renderTools(s) {
+  const tc = (s.stats && s.stats.toolCounts) || null
+  if (!tc) {
+    $('toolbars').innerHTML = '<div class="empty small">等待全量统计…</div>'
+    $('tool-tag').textContent = ''
+    return
+  }
+  const arr = Object.entries(tc).sort((a, b) => b[1] - a[1]).slice(0, 8)
+  const max = Math.max(1, ...arr.map((x) => x[1]))
+  const total = Object.values(tc).reduce((a, b) => a + b, 0)
+  $('tool-tag').textContent = total + ' 次调用'
+  $('toolbars').innerHTML = arr.map(([k, v]) =>
+    '<div class="tb"><span class="n">' + esc(k) + '</span><span class="c">' + v + '</span>'
+    + '<span class="b"><i style="width:' + ((v / max) * 100) + '%"></i></span></div>').join('')
+}
+
+function renderEnv(s) {
+  const app = s.app || {}
+  $('env-selftest').textContent = app.selfTest || '—'
+  $('env-usb').textContent = app.online ? (app.usbOpen ? '已连接 ' + (app.device || '') : '未连接') : '副屏离线'
+  const lcd = s.lcd || {}
+  $('env-balance').textContent = lcd.balance
+    ? (lcd.balance.currency + ' ' + Number(lcd.balance.total).toFixed(2) + (lcd.balance.available ? ' 可用' : ''))
+      + (lcd.balanceErr ? '（取数失败：' + lcd.balanceErr + '）' : '')
+    : (lcd.at ? '快照无余额字段' : '无快照（DSH 未运行？）')
+  $('env-printer').textContent = lcd.printerState ? (lcd.printerState + ' · ' + (lcd.printerTrays || 0) + ' 托盘') : '—'
+  $('env-turns').textContent = s.stats ? (s.stats.turns + ' 轮' + (s.stats.errors ? ' · 错 ' + s.stats.errors : '')) : '—'
+  $('env-stats').textContent = s.stats
+    ? (s.stats.lines + ' 行 / ' + s.stats.decodeMs + 'ms')
+    : '—'
+  $('env-tag').textContent = [s.health && s.health.app ? '副屏✓' : '副屏✗',
+    s.health && s.health.session ? '会话✓' : '会话✗',
+    s.health && s.health.heavy ? '全量✓' : '全量…'].join(' ')
+  $('env-cwd').textContent = s.stats && s.stats.cwd ? s.stats.cwd : (s.session ? s.session.file : '')
+}
+
+/* ───────────── 主渲染 ───────────── */
+function render(s) {
+  SNAP = s
+  renderHeader(s)
+  renderSession(s)
+  renderAgent(s)
+  renderScreen(s)
+  renderControls(s)
+  renderTimeline(s.timeline || [])
+  renderTodos(s)
+  renderUsage(s)
+  renderSystem(s)
+  renderTools(s)
+  renderEnv(s)
+}
+
+/* ───────────── 取数 ───────────── */
+let sse = null
+let pollTimer = null
+
+function setConn(ok, text) {
+  const c = $('conn')
+  c.classList.toggle('off', !ok)
+  c.querySelector('span').textContent = text
+}
+
+function startSSE() {
+  try {
+    sse = new EventSource('/api/stream')
+  } catch (e) {
+    startPolling()
+    return
+  }
+  sse.addEventListener('state', (ev) => {
+    setConn(true, 'SSE 实时')
+    try {
+      render(JSON.parse(ev.data))
+    } catch (e) { /* 忽略半包 */ }
+  })
+  sse.onopen = () => setConn(true, 'SSE 实时')
+  sse.onerror = () => {
+    setConn(false, 'SSE 断开 · 轮询中')
+    if (!pollTimer) startPolling()
+  }
+}
+
+function startPolling() {
+  if (pollTimer) return
+  setConn(false, '轮询 1s')
+  pollTimer = setInterval(async () => {
+    try {
+      const r = await fetch('/api/state')
+      render(await r.json())
+      if (sse && sse.readyState === 1) {
+        clearInterval(pollTimer); pollTimer = null
+      }
+    } catch (e) {
+      setConn(false, '取数失败')
+    }
+  }, 1000)
+}
+
+function tickFrame() {
+  const img = $('frame')
+  if (!SNAP || !SNAP.app || !SNAP.app.online) return
+  img.src = '/api/frame.jpg?t=' + Date.now()
+}
+function tickClock() {
+  const d = new Date()
+  const p = (n) => String(n).padStart(2, '0')
+  $('clock').textContent = p(d.getHours()) + ':' + p(d.getMinutes()) + ':' + p(d.getSeconds())
+}
+
+/* ───────────── 交互 ───────────── */
+$('sessSel').addEventListener('change', async (e) => {
+  const file = e.target.value
+  try {
+    const r = await fetch('/api/watch', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ file }),
+    })
+    const j = await r.json()
+    if (j.ok) {
+      follow = j.watch === 'auto'
+      $('followBtn').classList.toggle('on', follow)
+      lastTimelineKey = ''
+      toast(j.watch === 'auto' ? '已切回跟随最新' : '已固定到该会话')
+    } else toast(j.error || '切换失败', true)
+  } catch (err) { toast('切换失败：' + err.message, true) }
+})
+$('followBtn').addEventListener('click', async () => {
+  await fetch('/api/watch', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ file: 'auto' }) })
+  follow = true
+  $('followBtn').classList.add('on')
+  lastTimelineKey = ''
+  toast('已切回跟随最新')
+})
+$('reloadBtn').addEventListener('click', async () => {
+  const r = await fetch('/api/sessions')
+  const j = await r.json()
+  toast('会话列表已刷新：' + (j.sessions || []).length + ' 个')
+  $('sessSel').dataset.key = ''
+})
+for (const b of document.querySelectorAll('.chipbtn[data-f]')) {
+  b.addEventListener('click', () => {
+    filter = b.dataset.f
+    for (const x of document.querySelectorAll('.chipbtn[data-f]')) x.classList.toggle('on', x === b)
+    lastTimelineKey = ''
+  })
+}
+$('autoBtn').addEventListener('click', () => {
+  autoScroll = !autoScroll
+  $('autoBtn').classList.toggle('on', autoScroll)
+})
+$('expandBtn').addEventListener('click', () => {
+  expandAll = !expandAll
+  $('expandBtn').classList.toggle('on', expandAll)
+  lastTimelineKey = ''
+})
+$('copyBtn').addEventListener('click', async () => {
+  const t = $('cmd').value
+  if (!t.trim()) return toast('先写点什么', true)
+  try {
+    await navigator.clipboard.writeText(t)
+    toast('已复制到剪贴板，去 DSH 输入框粘贴')
+  } catch (e) {
+    toast('复制失败（浏览器权限），请手动选择复制', true)
+  }
+})
+$('inboxBtn').addEventListener('click', async () => {
+  const t = $('cmd').value
+  if (!t.trim()) return toast('先写点什么', true)
+  try {
+    const r = await fetch('/api/inbox', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ text: t }),
+    })
+    const j = await r.json()
+    if (j.ok) {
+      toast('已存入收件箱：' + j.file)
+      $('inboxNote').textContent = '最后存入 ' + new Date().toLocaleTimeString()
+      $('cmd').value = ''
+    } else toast(j.error || '存入失败', true)
+  } catch (e) { toast('存入失败：' + e.message, true) }
+})
+$('dshBtn').addEventListener('click', () => window.open('http://127.0.0.1:3080/', '_blank'))
+
+/* ───────────── 启动 ───────────── */
+/*
+ * 两种形态，同一份页面：
+ *   · 实时版：由 bridge/console-server.mjs 提供，走 SSE（默认）
+ *   · 静态快照版：`tools/console.sh export` 会把一份真实快照（含副屏 JPEG）**烘进**这个文件里，
+ *     双击就能看效果，不需要起服务、不需要 DSH 在跑。此时 window.__DSH_CONSOLE_SNAPSHOT__ 存在。
+ */
+const BAKED = window.__DSH_CONSOLE_SNAPSHOT__ || null
+const BAKED_FRAME = window.__DSH_CONSOLE_FRAME__ || ''
+const STATIC_MODE = !!BAKED
+
+async function setApp(q, note) {
+  if (STATIC_MODE) return toast('静态快照不能操作；实时版：bash tools/console.sh start → http://127.0.0.1:54550/', true)
+  try {
+    const r = await fetch('/api/app/set', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ q }),
+    })
+    const j = await r.json()
+    if (j.ok) toast(note + ' ✓' + (j.dropped && j.dropped.length ? '（已忽略 ' + j.dropped.join(',') + '）' : ''))
+    else toast('失败：' + (j.error || JSON.stringify(j.applied || {})), true)
+  } catch (e) {
+    toast('请求失败：' + e.message, true)
+  }
+}
+
+if (STATIC_MODE) {
+  document.body.classList.add('static')
+  setConn(true, '静态快照')
+  render(BAKED)
+  if (BAKED_FRAME) $('frame').src = BAKED_FRAME
+  const banner = document.createElement('div')
+  banner.className = 'banner'
+  banner.innerHTML = '静态快照（真实数据烘进本文件）· 生成于 '
+    + esc(BAKED.stamp || hhmmss(BAKED.ts))
+    + ' · 实时版：<b>bash tools/console.sh start</b> → <b>http://127.0.0.1:54550/</b>'
+  document.querySelector('header').after(banner)
+} else {
+  startSSE()
+}
+tickClock()
+setInterval(tickClock, 1000)
+if (!STATIC_MODE) {
+  frameTimer = setInterval(tickFrame, 1000)
+  setTimeout(tickFrame, 400)
+  // 保险：SSE 若被中间层缓冲，2s 后主动拉一次
+  setTimeout(async () => {
+    if (!SNAP) {
+      try {
+        const r = await fetch('/api/state')
+        render(await r.json())
+      } catch (e) { /* 忽略 */ }
+    }
+  }, 2000)
+}
+</script>
+</body>
+</html>
