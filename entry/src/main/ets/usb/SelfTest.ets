@@ -15,6 +15,8 @@ import { CalibState, CalibStep, calibrate, nextQuality, VP_MAX_W, VP_MAX_H,
   MAX_CALIB_ATTEMPTS } from '../service/CanvasCalib';
 import { normalizePrinter, MAX_TRAYS, normalizeTelemetry, normalizeTodos, MAX_TODOS } from '../common/Normalize';
 import { pickSystem } from '../common/SystemMerge';
+import { FocusTimer } from '../common/Toasts';
+import { Series } from '../common/History';
 import { Dashboard } from '../render/Dashboard';
 import { randomExpr, DOTII_EXPR_NAMES } from '../render/ThemeDotii';
 import { ThemeSnake, SnakeState } from '../render/ThemeSnake';
@@ -660,6 +662,77 @@ export class SelfTest {
       }
       items.push(new TestItem('背景风格名表·正反查一致', ok2,
         ok2 ? `${BG_STYLE_NAMES.length} 种：${BG_STYLE_NAMES.join('/')}` : bad.join(' ')));
+    }
+
+    // ── 专注计时：跨暂停累计（2026-10-31 修中-15 的配套自检）──
+    // 起因：accumulated 字段原来只在 tick 里被清零、从没真正累计过，
+    // busy→idle 的专注时长被直接丢弃，"专注中暂停再继续"永远凑不满一个番茄。
+    {
+      const ft = new FocusTimer();
+      const t0 = 1000000;
+      const M = 60000;
+      // 段1：busy 6 分钟 → idle。不足 10 分钟不记番茄，但累计要保留
+      ft.tick(t0, true);
+      const r1 = ft.tick(t0 + 6 * M, false);
+      const idleMs = ft.elapsedMs(t0 + 6 * M);
+      // 段2：再 busy 6 分钟 → idle。累计 12 分钟 → 记 1 个番茄并清零
+      ft.tick(t0 + 7 * M, true);
+      const segMs = ft.elapsedMs(t0 + 7 * M + 3 * M);
+      const r2 = ft.tick(t0 + 7 * M + 6 * M, false);
+      const afterMs = ft.elapsedMs(t0 + 20 * M);
+      items.push(new TestItem('专注计时·跨暂停累计凑满番茄',
+        r1 && r2 && idleMs === 6 * M && segMs === 9 * M
+        && ft.pomodoros === 1 && afterMs === 0,
+        `暂停后保留 ${idleMs / M} 分钟、忙时显示 ${segMs / M} 分钟、`
+        + `番茄 ${ft.pomodoros}、记完清零 ${afterMs}`));
+    }
+    {
+      // 单段直接满 10 分钟：旧行为必须原样保留（回归护栏）
+      const ft = new FocusTimer();
+      const t0 = 1000000;
+      ft.tick(t0, true);
+      ft.tick(t0 + 10 * 60000, false);
+      items.push(new TestItem('专注计时·单段满10分钟记番茄',
+        ft.pomodoros === 1 && ft.elapsedMs(t0) === 0,
+        `pomodoros=${ft.pomodoros}`));
+    }
+    {
+      // 阈值边界：两段各 5 分钟，合计恰好 10 分钟 → 也算（>= 判定）
+      const ft = new FocusTimer();
+      const t0 = 1000000;
+      ft.tick(t0, true);
+      ft.tick(t0 + 5 * 60000, false);
+      ft.tick(t0 + 6 * 60000, true);
+      ft.tick(t0 + 11 * 60000, false);
+      items.push(new TestItem('专注计时·合计恰好满阈值',
+        ft.pomodoros === 1 && ft.elapsedMs(t0) === 0,
+        `pomodoros=${ft.pomodoros}`));
+    }
+
+    // ── 历史曲线：断点标记 -1 不被归一化吞掉（2026-10-31 修中-14 配套）──
+    // 起因：pushGap() 走 push(-1)，而 push 把 -1 归一成 0 ——
+    // 桥断线期间曲线画成一段贴地的假数据，而不是按设计断开折线。
+    {
+      const s = new Series(10, 100);
+      s.push(50);
+      s.pushGap();
+      s.push(30);
+      items.push(new TestItem('历史曲线·断点-1原样保留',
+        s.length === 3 && s.at(1) === -1 && s.at(0) === 50 && s.last() === 30,
+        `at(1)=${s.at(1)}（应为 -1），正常样本 50/30 不受影响`));
+    }
+    {
+      // 断点在绘制端必须映射成 -1（sparkline 据此断线），且不抬动态纵轴
+      const s = new Series(10, 100);
+      s.pushGap();
+      s.push(40);
+      const yGap = s.pointY(0, 0, 100, 100);
+      const dyn = new Series(10);
+      dyn.pushGap();
+      dyn.push(40);
+      items.push(new TestItem('历史曲线·断点跳过归一化与纵轴',
+        yGap === -1 && dyn.scaleMax() === 40,
+        `pointY(断点)=${yGap}，动态纵轴=${dyn.scaleMax()}（-1 未被当作 0 参与计算）`));
     }
 
     return items;

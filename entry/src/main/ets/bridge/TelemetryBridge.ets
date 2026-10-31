@@ -17,6 +17,14 @@ export class TelemetryBridge {
   private decoder = util.TextDecoder.create('utf-8');
   readonly state: TelemetryState = new TelemetryState();
   private listening: boolean = false;
+  /**
+   * 生命周期代数（2026-10-31 修中-19）：stop() 换代。
+   * rebind() 里 stop → 等 300ms → start 是**分离的异步步骤**，等待窗口内
+   * 若发生整体 stop()（应用退出/服务停止），延迟到达的 start() 会把
+   * socket 从坟里拉起来 —— 之后这个幽灵 socket 谁也不关。
+   * 换代后 rebind 的续步发现代数变了就放弃复活。
+   */
+  private generation: number = 0;
 
   /**
    * 上一份"好值"缓存（按顶层字段）。
@@ -213,13 +221,17 @@ export class TelemetryBridge {
     if (this.udp !== null) {
       try {
         this.udp.off('message');
-        this.udp.close();
+        // close() 返回 Promise：try/catch 只接得住同步抛，异步拒绝要单独吞
+        this.udp.close().catch(() => {
+          // 关闭失败只能忽略：socket 反正要废弃
+        });
       } catch (e) {
         // ignore
       }
       this.udp = null;
     }
     this.listening = false;
+    this.generation++;   // 换代：让在飞的 rebind 续步识别"我已被停"（见字段说明）
   }
 
   /**
@@ -233,11 +245,18 @@ export class TelemetryBridge {
   async rebind(): Promise<boolean> {
     Logger.w('数据桥长时间收不到包，重新绑定 socket');
     this.stop();
+    // 记下本轮 rebind 所属的代：等待期间若又被 stop()（应用退出），
+    // 代数会再变 → 放弃 start()，不给已停的服务立幽灵 socket（2026-10-31 修中-19）
+    const gen = this.generation;
     await new Promise<void>((resolve: () => void) => {
       setTimeout(() => {
         resolve();
       }, 300);
     });
+    if (gen !== this.generation) {
+      Logger.i('rebind 等待期间桥已被停止，放弃重新绑定');
+      return false;
+    }
     return this.start();
   }
 }

@@ -229,6 +229,10 @@ export class Dashboard {
       ctx.fillRect(0, 0, L.width, L.height);
     }
     if (vertical) {
+      // ★ 竖装分支**不支持档位**（cellLayoutOverride 在这里被忽略，2026-10-31 注明，
+      //   原审查中-20）：档位几何全按横装 1920×462 写死。调用方（LcdService）已在
+      //   竖装下停掉"打印机格画 Dotii"（dotiiInPrinter 加了 !verticalMode 护栏），
+      //   主题 9 也有 HORIZONTAL_ONLY 竖装回落，这里无需再处理档位。
       Dashboard.renderVertical(ctx, t, fs, vm, vmAgeMs, vmErr);
       return;
     }

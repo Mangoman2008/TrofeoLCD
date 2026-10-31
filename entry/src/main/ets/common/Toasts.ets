@@ -97,7 +97,12 @@ export class FocusTimer {
 
   /** 当前这段专注的开始时间（0 = 没有在专注） */
   startedAt: number = 0;
-  /** 当前这段已经累计的毫秒（暂停时保留） */
+  /**
+   * 当前段之前的累计毫秒（2026-10-31 修中-15：原来这个字段只在 tick 里被清零，
+   * 从没真正累计过 —— busy→idle 的时长被直接丢弃，跨暂停的专注凑不满一个番茄，
+   * "专注中暂停再继续"的场景永远拿不到 pomodoro。现在 busy→idle 把当前段并进来，
+   * 暂停不丢进度；攒够 MIN_MIN 记一个番茄并清零重新计下一个。
+   */
   private accumulated: number = 0;
   /** 今天完成的番茄数 */
   pomodoros: number = 0;
@@ -112,24 +117,26 @@ export class FocusTimer {
       return false;
     }
     if (this.startedAt !== 0) {
-      const focusedMs = now - this.startedAt;
-      const back = this.accumulated;
-      this.accumulated = 0;
+      const focusedMs = Math.max(0, now - this.startedAt);
       this.startedAt = 0;
-      if (focusedMs >= FocusTimer.MIN_MIN * 60000) {
+      this.accumulated += focusedMs;
+      if (this.accumulated >= FocusTimer.MIN_MIN * 60000) {
         this.pomodoros++;
+        this.accumulated = 0;
       }
-      return focusedMs !== 0 || back !== 0;
+      return true;
     }
     return false;
   }
 
-  /** 当前正在专注的时长（毫秒）；没在专注返回 0 */
+  /**
+   * 已专注的总时长（毫秒）= 跨暂停的累计 + 当前正在进行的这段。
+   * （2026-10-31 语义修正：原来只返回当前段，idle 即 0 —— 暂停后屏上的
+   * "专注 mm:ss"直接清零，与 accumulated 的注释承诺不符。）
+   */
   elapsedMs(now: number): number {
-    if (this.startedAt === 0) {
-      return 0;
-    }
-    return Math.max(0, now - this.startedAt);
+    const seg = this.startedAt === 0 ? 0 : Math.max(0, now - this.startedAt);
+    return this.accumulated + seg;
   }
 
   /** 显示用：mm:ss（超过一小时显示 h:mm:ss） */

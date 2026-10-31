@@ -18,7 +18,10 @@ export class Series {
   }
 
   push(v: number): void {
-    const x = isFinite(v) && v >= 0 ? v : 0;
+    // -1 是 pushGap 的断点标记，原样放行：绘制端靠它断开折线
+    // （2026-10-31 审计修复：原来 -1 在这里被归一成 0，桥断线期间
+    // 曲线画成一段贴地的假数据，而不是按设计断开）
+    const x = v === -1 ? -1 : (isFinite(v) && v >= 0 ? v : 0);
     this.buf.push(x);
     while (this.buf.length > this.cap) {
       this.buf.shift();

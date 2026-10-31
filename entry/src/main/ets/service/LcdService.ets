@@ -106,7 +106,10 @@ const MIN_QUALITY: number = 0.4;
 const FAST_ENCODE: boolean = false;
 
 function ThemeMacTick(theme: number): number {
-  // 主题 8 的时钟带秒 → 签名要带秒，否则秒不动（签名没变就跳过重推）
+  // 主题 8 的时钟带秒 → 签名要带秒，否则秒不动（签名没变就跳过重推）。
+  // ★ 有意保留的成本（2026-10-31 定性，原审查中-13）：秒针意味着每秒一次全量
+  //   重渲染+重编码（实测 ~1 次/秒 × 编码 71ms ≈ 7% 占空比）。砍掉它 = 秒针不动，
+  //   主题 8 就失去意义；等真的需要省这 7% 再谈"秒针低帧率"方案。
   return theme === 8 ? new Date().getSeconds() : 0;
 }
 
@@ -151,6 +154,8 @@ export class LcdService {
    */
   private backgrounded: boolean = false;
   private timerId: number = -1;
+  /** 帧循环代数：stop() 换代，使旧链 tick 的 .then() 里能识别"我已被换代"（见 loop()） */
+  private loopGen: number = 0;
   private b64: util.Base64Helper = new util.Base64Helper();
   /** 屏幕密度：画布 vp → 像素（getPixelMap 用像素坐标；只在首帧兜底用） */
   private density: number = 1;
@@ -234,9 +239,11 @@ export class LcdService {
   /** 即使内容没变，也要每隔这么久补推一帧（防止面板丢帧/息屏） */
   private static readonly HEARTBEAT_MS: number = 10000;
   /**
-   * 推帧间隔下限（ms）。一帧的真实成本 = render 2 + encode 50 + push 55 ≈ 110ms，
-   * 间隔小于它不会提升帧率，只会把 USB 端点灌爆（实测：端点错误态、屏黑）。
-   * 120ms ≈ 8fps，就是这块屏+这条链路的实测天花板。
+   * 推帧间隔下限（ms）。★ 只对 `/set?fps=N` 的 forceIntervalMs 生效（见 applySettings
+   * 的 `Math.max(MIN_PUSH_INTERVAL_MS, want)`），**不管**自适应策略（SchedulePolicy）：
+   * 自适应的 busy=66ms 是预烘焙实测后的有意安全值（见 docs/预烘焙能否提升主题帧率.md：
+   * burst=1 下 66ms 间隔拿到 5→15fps，再压间隔只会把 USB 灌爆），不是这里漏管。
+   * （2026-10-31 定性，原审查中-4：这个常量曾疑似死代码 —— 它不是，作用域就是 force 档。）
    */
   private static readonly MIN_PUSH_INTERVAL_MS: number = 120;
   /**
@@ -537,6 +544,12 @@ export class LcdService {
     this.onStatus();
   }
 
+  /** 主题总数（0..THEME_COUNT-1）。★ 单一真源（2026-10-31）：setTheme 的上限、
+   *  轮播的取模都从这里取 —— 以前 setTheme 写 18、轮播写 %16 两处漂移过
+   *  （16/17/18 三个主题轮播永远轮不到），加新主题只改这一处 + Index 的 themeName 表。
+   */
+  static readonly THEME_COUNT: number = 19;
+
   /**
    * 主题切换的**唯一写入口**（代码审查【高危-5】）。
    *
@@ -549,8 +562,8 @@ export class LcdService {
    */
   setTheme(n: number, byUser: boolean = false): void {
     // ★ 上限跟着主题表走：加了主题 16（全屏贪吃蛇）之后这里必须同步，
-    //   否则 /set?theme=16 会被静默改回 0（实测踩过）。
-    const v = (n >= 0 && n <= 18) ? n : 0;
+    //   否则 /set?theme=16 会被静默改回 0（实测踩过）。→ 已提到 THEME_COUNT。
+    const v = (n >= 0 && n < LcdService.THEME_COUNT) ? n : 0;
     if (byUser) {
       this.themeTouched = true;
       this.lastThemeSwitch = Date.now();   // 见上：防轮播立刻把用户的选择切走
@@ -1806,6 +1819,9 @@ export class LcdService {
       clearTimeout(this.timerId);
       this.timerId = -1;
     }
+    // ★ 换代：让还在飞的旧 tick 的 .then()（Promise 不可取消）识别出链已死，
+    //   防止 stop→start 快速切换时旧链复活抢新链的 timerId（见 loop() 的代数护栏）。
+    this.loopGen++;
     this.bridge.stop();
     this.frameServer.stop();
     this.usb.close();
@@ -1889,6 +1905,13 @@ export class LcdService {
   }
 
   private async encodeFast(ctx: CanvasRenderingContext2D, quality: number): Promise<Uint8Array | null> {
+    // ★ pm/parker 必须在 finally 里统一释放（2026-10-31 修中-2 残留）：
+    //   原来 packing()/getImageInfoSync() 抛异常时直接走 catch 返回 null，
+    //   PixelMap 与 ImagePacker 全部泄漏。这条路径在 FAST_ENCODE=false 时休眠，
+    //   但开关就摆在上面（2026-10-21 还复测过一次）—— 一旦再有人打开快路径
+    //   且编码连续失败，泄漏会逐帧累积，几分钟吃穿内存。
+    let pm: image.PixelMap | null = null;
+    let packer: image.ImagePacker | null = null;
     try {
       // 上一帧 JPEG 的真实宽高就是画布的像素尺寸（校准后的地面真值）；
       // 首帧还没有时用 vp×密度兜底
@@ -1897,7 +1920,7 @@ export class LcdService {
       if (pxW <= 0 || pxH <= 0) {
         return null;
       }
-      const pm = ctx.getPixelMap(0, 0, pxW, pxH);
+      pm = ctx.getPixelMap(0, 0, pxW, pxH);
       if (pm === null) {
         return null;
       }
@@ -1906,21 +1929,33 @@ export class LcdService {
       const got = pm.getImageInfoSync();
       if (got.size.width !== pxW || got.size.height !== pxH) {
         Logger.w(`快路径取到的尺寸是 ${got.size.width}x${got.size.height}，期望 ${pxW}x${pxH} → 回退`);
-        pm.release();
         return null;
       }
-      const packer = image.createImagePacker();
+      packer = image.createImagePacker();
       const opt: image.PackingOption = {
         format: 'image/jpeg',
         quality: Math.round(quality * 100)
       };
       const buf = await packer.packing(pm, opt);
-      pm.release();
-      packer.release();
       return new Uint8Array(buf);
     } catch (e) {
       Logger.w(`快路径编码不可用，回退 toDataURL: ${Logger.safe(e)}`);
       return null;
+    } finally {
+      if (pm !== null) {
+        try {
+          pm.release();
+        } catch (e) {
+          // 已释放/释放失败都不致命（packing 内部异常时可能已带出失败态）
+        }
+      }
+      if (packer !== null) {
+        try {
+          packer.release();
+        } catch (e) {
+          // 同上
+        }
+      }
     }
   }
 
@@ -2043,6 +2078,13 @@ export class LcdService {
       `anim=${this.theme >= 10 && this.theme <= 14 ? Math.floor(Date.now() / 500)
         : (this.theme === 15 ? Math.floor(Date.now() / 250) : 0)}`,
       `bsod=${this.bsodUntil > Date.now() ? Math.ceil((this.bsodUntil - Date.now()) / 1000) : 0}`,
+      // ★ 边框扫光（Overlay.sweepBorder，默认天气主题 + /set?sweep=2 强制全局）：
+      //   光带位置由 Date.now() 对 sweepLapMs（默认 12s）取相驱动。签名里原来没有
+      //   这一项 → 静态主题上扫光只能靠 3s 心跳动一下（2026-10-31 修，审计【中】）。
+      //   250ms 粒度与天气主题的 wxq= 对齐（4 步/秒，12s 一圈 ≈ 每步挪 ~1% 圈长，够顺）。
+      //   判定式与真正绘制处（Overlay.sweepBorder 的调用点）严格一致，别只判 sweepOn。
+      `sw=${this.sweepOn && (this.theme === 18 || this.sweepForce)
+        ? Math.floor(Date.now() / 250) : 0}`,
       // 跑马灯按 ~12Hz 步进进签名；时间轴按分钟（每分钟才需要重推一次）
       `tk=${this.tickerOn ? Math.floor(Date.now() / 80) : 0}`,
       `tl=${this.timelineOn ? Math.floor(Date.now() / 60000) : 0}`,
@@ -2104,10 +2146,21 @@ export class LcdService {
     if (!this.running) {
       return;
     }
+    // ★ 双开护栏（2026-10-31 修中-18）：旧链还活着就拒绝再开。
+    //   没有它时两条 tick 链会并行，每条链的 setTimeout 句柄互相覆盖 timerId，
+    //   stop() 的 clearTimeout 只能杀掉最后一条 —— 另一条变成永远停不下来的幽灵帧循环。
+    if (this.timerId >= 0) {
+      Logger.w('帧循环已在运行，忽略重复 loop() 调用');
+      return;
+    }
+    // ★ 代数计数：stop→start 快速切换时，旧链 tick 的 .then() 可能在新 start 之后
+    //   才执行（Promise 回调不可取消），此时 running 已被新 start 置回 true，
+    //   只判 running 会让旧链复活并抢走新链的 timerId。换代让旧链的 then 自杀。
+    const gen = ++this.loopGen;
     const tick = () => {
       this.tickStartMs = Date.now();   // 极速模式要用它扣除本帧耗时
       this.tick().then(() => {
-        if (!this.running) {
+        if (!this.running || gen !== this.loopGen) {
           return;
         }
         const inp = new FrameTickInput();
@@ -2139,7 +2192,7 @@ export class LcdService {
         // ★ 用 safe()：这里若二次抛出，下面的重排就永远走不到，帧循环会永久停止
         Logger.e(`帧循环异常: ${Logger.safe(e)}`);
         this.lastTickErrored = true;
-        if (this.running) {
+        if (this.running && gen === this.loopGen) {
           this.timerId = setTimeout(tick, 1000);
         }
       });
@@ -2342,6 +2395,8 @@ export class LcdService {
           this.lastPageSwitch = Date.now();
         } else if (k === 'pagerot') {
           this.pageRotateSec = Math.max(0, Number(kv.substring(i + 1)));
+          // 调整翻页节奏 → 计时起点刷新：否则旧的 lastPageSwitch 残留会让新节奏立刻翻一次
+          this.lastPageSwitch = Date.now();
         } else if (k === 'vigcorner') {
           const n = Number(kv.substring(i + 1));
           this.vigCornerForce = (n >= 0 && n <= 3) ? n : -1;
@@ -2882,9 +2937,10 @@ export class LcdService {
         this.lastThemeSwitch = Date.now();
       } else {
         this.lastThemeSwitch = Date.now();
-        // ★ 原来是 % 3：只会在主题 0/1/2 之间循环，永远轮不到 3~6（分页屏/打砖块/Dotii/固件仿真）。
-        //   主题总数见 Theme.L / LcdService 的 theme 字段说明（当前 7 个：0..6）。
-        this.setTheme((this.theme + 1) % 16, false);
+        // ★ 原来是 % 3（只轮 0/1/2），10-15 审查后改成 % 16；但主题已经加到 19 个
+        //   （0..18，见 THEME_COUNT）→ 16/17/18（贪吃蛇/玛丽/天气）永远轮不到。
+        //   2026-10-31 改成单一真源 THEME_COUNT，以后加主题只改那一处。
+        this.setTheme((this.theme + 1) % LcdService.THEME_COUNT, false);
         this.onStatus();
       }
     }
@@ -2898,10 +2954,16 @@ export class LcdService {
     }
 
     // 分页屏自动翻页（只在主题 3 生效）
-    if (this.theme === 3 && this.pageRotateSec > 0
-        && Date.now() - this.lastPageSwitch >= this.pageRotateSec * 1000) {
-      this.lastPageSwitch = Date.now();
-      this.page = (this.page + 1) % ThemePages.PAGE_COUNT;
+    // ★ 首翻守卫（2026-10-31 修中-17）：lastPageSwitch 初始为 0，
+    //   `Date.now() - 0` 恒远大于翻页间隔 → 进主题 3 的第一帧就立刻翻页，
+    //   用户根本看不到第一页。与上面主题轮播的 lastThemeSwitch 守卫同型。
+    if (this.theme === 3 && this.pageRotateSec > 0) {
+      if (this.lastPageSwitch === 0) {
+        this.lastPageSwitch = Date.now();
+      } else if (Date.now() - this.lastPageSwitch >= this.pageRotateSec * 1000) {
+        this.lastPageSwitch = Date.now();
+        this.page = (this.page + 1) % ThemePages.PAGE_COUNT;
+      }
     }
 
     // ---- 看门狗：USB 开着但长时间推不出去 → 主动断开重连 ----
@@ -3102,6 +3164,10 @@ export class LcdService {
     // ★ 'v4' 也要走这条分支（13:29 版同样是"打印机格画 Dotii"，只是档位不同）。
     //   之前只判 'dotii'，导致 printerCell=v4 时**格子空着没人画**（实测踩过）。
     const dotiiInPrinter = this.theme === 0
+      // ★ 竖装不画（2026-10-31 修中-20）：ThemeDotiiCell 的几何按横装 1920×462 写死，
+      //   竖装画布（462×1920 逻辑空间）下这些坐标会落到画布外/错位（Dashboard.render
+      //   的竖装分支也不支持档位，见它内部的注释）。竖装本来就是次要形态，直接不画。
+      && !this.verticalMode
       && (this.printerCell === 'dotii' || this.printerCell === 'v4'
         || this.printerCell === 'v6');
     // 主题 0 的打印机格：printer=标准档(0)；dotii=对调档(3)；v4=13:29 版(4)

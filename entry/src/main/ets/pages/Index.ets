@@ -162,6 +162,16 @@ struct Index {
     this.logSafeArea();
   }
 
+  aboutToDisappear(): void {
+    // ★ 页面销毁必须清掉每秒的 UI 刷新定时器（2026-10-31 审计 A9）：
+    //   不清的话定时器在页面销毁后仍每秒跑 refreshStatus —— 持续读服务状态、
+    //   写已拆组件树的 @State，白耗电还可能每秒刷异常日志。
+    if (this.statusTimer >= 0) {
+      clearInterval(this.statusTimer);
+      this.statusTimer = -1;
+    }
+  }
+
   /** 读取已保存的设置（VM 地址 + 三个开关） */
   /** 把 sk- key 落盘（只做一次；失败不影响运行） */
   private saveDeepseekKey(k: string): void {
