@@ -20,10 +20,38 @@ import { ThemeAnimeFree } from '../../.verify/render/ThemeAnimeFree.ts';
 import { ThemeAnimeHUD } from '../../.verify/render/ThemeAnimeHUD.ts';
 import { ThemeNanoMuse } from '../../.verify/render/ThemeNanoMuse.ts';
 import { ThemeTrofeoRust } from '../../.verify/render/ThemeTrofeoRust.ts';
+// ★ 2026-10-31 C3 补：ThemeAnime 此前漏了 import（只引了 BG/Free/HUD 三个变体），
+//   --theme=10 直接 ReferenceError 崩溃 —— 主题 10 的布局审计从来没跑成过。
+import { ThemeAnime } from '../../.verify/render/ThemeAnime.ts';
+import { ThemeSnake, SnakeState } from '../../.verify/render/ThemeSnake.ts';
+import { ThemeWeather } from '../../.verify/render/ThemeWeather.ts';
+import { WeatherData, WxCond } from '../../.verify/service/WeatherService.ts';
 import { History } from '../../.verify/render/../common/History.ts';
 import { FocusTimer } from '../../.verify/render/../common/Toasts.ts';
 import { L, V } from '../../.verify/common/Theme.ts';
 import type { Telemetry } from '../../.verify/common/Types.ts';
+
+// ★ 时钟钉死（2026-10-31 审计 C3）：主题 13/14/15 的时钟/时长文字直接取 Date.now()
+//   （ThemeAnimeHUD:108、ThemeNanoMuse:121、ThemeTrofeoRust:214/219/234），
+//   真时钟下文字宽度逐次漂移 → 审计结果不可复现（基线 13=20/14=58/15=6 个问题在抖）。
+//   钉死后时钟、弹窗剩余、专注计时的文字全部确定 → 审计逐字节可复现。
+//   1730000000000 ≈ 2024-10-27 22:13:20（UTC+8）。
+const PINNED_NOW = 1730000000000;
+Date.now = (): number => PINNED_NOW;
+// ★ 无参 `new Date()` 同样要钉（ThemeAnime:316 / BG:377 / Free:117 / HUD:434 /
+//   NanoMuse:237 的时钟走构造器，只钉 Date.now 会漏）。带参构造（主题 5/6/9/18
+//   传的显式时间戳）原样放行。
+const RealDate = Date;
+class PinnedDate extends RealDate {
+  constructor(ms?: number | string) {
+    if (ms === undefined) {
+      super(PINNED_NOW);
+    } else {
+      super(ms);
+    }
+  }
+}
+(globalThis as any).Date = PinnedDate;
 
 function sampleTelemetry(): Telemetry {
   const t: any = {};
@@ -77,6 +105,34 @@ function sampleTelemetry(): Telemetry {
     ]
   };
   return t as Telemetry;
+}
+
+/** 主题 18 的天气样本：字段全给真值（ok 分支），24h 曲线 + 7 天预报全部有内容可审 */
+function sampleWeather(): WeatherData {
+  const d = new WeatherData();
+  d.ok = true;
+  d.city = '深圳';
+  d.lat = 22.5431;
+  d.lon = 114.0579;
+  d.tempC = 26.4;
+  d.feelsC = 27.2;
+  d.humidity = 68;
+  d.windKph = 12.3;
+  d.windDeg = 135;
+  d.cond = WxCond.CLOUDY;
+  d.code = 2;
+  // 24h 温度：日内正弦周期（从当前小时起的"未来"曲线）
+  d.hourly = [];
+  for (let i = 0; i < 24; i++) {
+    d.hourly.push(Math.round((23 + 4 * Math.sin((i / 24) * Math.PI * 2 - Math.PI / 2)) * 10) / 10);
+  }
+  d.dMin = [21, 22, 22, 20, 19, 20, 21];
+  d.dMax = [28, 29, 27, 25, 24, 26, 27];
+  d.dCond = [WxCond.CLOUDY, WxCond.CLEAR, WxCond.RAIN, WxCond.RAIN,
+    WxCond.CLOUDY, WxCond.CLEAR, WxCond.CLEAR];
+  d.atMs = PINNED_NOW;
+  d.errText = '';
+  return d;
 }
 
 const vertical = process.argv.includes('--vertical');
@@ -199,6 +255,23 @@ if (theme === 3) {
   (ThemeNanoMuse as any).render(shim, tm, fs, extras, 0, 620, 0);
 } else if (theme === 15) {
   (ThemeTrofeoRust as any).render(shim, fs, 0, 620, 0);
+} else if (theme === 16) {
+  // 主题 16「自走贪吃蛇」：照 LcdService:3212-3217 的真实路径
+  //   （new SnakeState → reset 58×14 → step → 全屏 draw）。
+  //   reset 的食物落点由 nowMs 播种（snkSeed）→ 钉死后棋局确定、审计可复现。
+  const snake = new SnakeState();
+  ThemeSnake.reset(snake, PINNED_NOW, 58, 14);
+  ThemeSnake.step(snake, PINNED_NOW);
+  (ThemeSnake as any).draw(shim, 0, 0, 1920, 462, snake, PINNED_NOW);
+} else if (theme === 17) {
+  // 主题 17「超级玛丽」：真实入口就是 LcdService:3207 的 Dashboard.mario.drawFullscreen。
+  //   mario 链零 Math.random、零 Date.now（2026-10-31 已核），nowMs 钉死 → 逐字节可复现；
+  //   step 的 dt 有 MAX_DT 钳制，首帧不会模拟"从 1970 年到现在"。
+  (Dashboard.mario as any).drawFullscreen(shim, 1920, 462, PINNED_NOW);
+} else if (theme === 18) {
+  // 主题 18「天气」：真实路径 LcdService:3201 —— ThemeWeather.render(ctx, now, wx.data)。
+  //   24h/7d 数组给足真实感的数据，让 24h 曲线与 7 天条全部被审到。
+  (ThemeWeather as any).render(shim, PINNED_NOW, sampleWeather());
 } else if (theme === 1) {
   (ThemeDiag as any).render(shim, tm, fs, null, 320, '', extras);
 } else if (theme === 2) {
@@ -271,11 +344,12 @@ if (theme === 3) {
   panels = trccPanels;
 } else if (theme === 8) {
   panels = macPanels;
-} else if (theme >= 9 && theme <= 15) {
+} else if (theme >= 9 && theme <= 18) {
   // ★ 2026-10-15 补：主题 9~15 是**整屏主题**（没有五格/卡片分区）。
   //   以前没有对应面板矩形，全部回落到 dashPanels（仪表盘五格）
   //   → "越出面板(DSH 会话)"这类报错全是**假问题**（内容本来就不在那些格子里）。
   //   改用整张画布：仍能查出"越出画布"，但不再拿仪表盘的格子去套它们。
+  //   2026-10-31 C3：16（贪吃蛇全屏棋盘）/17（玛丽全屏）/18（天气全屏）同为整屏主题。
   panels = [{ name: '整屏', x: 0, y: 0, w: 1920, h: 462 }];
 } else if (theme === 2) {
   panels = wallPanels;

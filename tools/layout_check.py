@@ -19,7 +19,7 @@
 """
 import json
 import os
-import re
+import shutil
 import subprocess
 import sys
 
@@ -28,62 +28,34 @@ ROOT = os.path.dirname(HERE)
 V = os.path.join(ROOT, '.verify')
 NODE = 'node'
 
-STRIP = re.compile(r"from '(\.\.?/[A-Za-z0-9_/]+)'")
-FILES = [
-    'render/Dashboard', 'render/ThemeDiag', 'render/ThemeWall', 'render/ThemePages', 'render/ThemePong', 'render/ThemeDotii', 'render/ThemeFwSim', 'render/ThemeTRCC', 'render/ThemeMac', 'render/ThemeDotiiCell', 'render/ThemeAnime', 'render/ThemeAnimeBG', 'render/ThemeAnimeFree', 'render/ThemeAnimeHUD', 'render/ThemeNanoMuse', 'render/ThemeTrofeoRust', 'render/Backdrop', 'render/Chrome',
-    'common/Theme', 'common/Types', 'common/Normalize', 'common/History', 'common/Toasts',
-    'common/Extras', 'usb/LyProtocol',
-]
 
+def load_files():
+    """转译清单 —— 与 run_selftest.sh 共用 tools/ets_files.txt（2026-10-31 C3）。
 
-ENUM_RE = re.compile(r'export\s+enum\s+(\w+)\s*\{(.*?)\}', re.S)
-
-
-def strip_enums(text: str) -> str:
-    """把 `export enum X { A = 0, B = 1 }` 改写成等价的常量对象。
-
-    ★ 为什么需要（2026-10-15 补）：Node 的 `--experimental-strip-types` 是
-      **strip-only** 模式 —— 它只删类型标注，不做代码生成，而 TS 的 `enum`
-      恰恰需要生成代码，于是直接抛
-        SyntaxError [ERR_UNSUPPORTED_TYPESCRIPT_SYNTAX]: TypeScript enum is not supported
-      `render/Backdrop.ets` 里的 `export enum BgStyle` 就卡在这里，
-      导致主题 15（会 import Backdrop）整个审计跑不起来。
-
-      改写成常量对象后语义等价（`BgStyle.Waves` 照样可读），且能在 strip-only 下跑。
-      只影响**布局审计**，不动真源码。
+    此前两边各维护一份、各自带一份剥类型实现，漏同步翻车三次
+    （ThemeDotiiCell / ThemeSnake+mario 链 / ThemeAnime —— 主题 10 审计崩溃一轮）。
+    引擎统一走 tools/ets_to_ts.py（enum 转换 + kit 打桩 + 相对导入补 .ts）。
     """
-    def conv(m):
-        name, body = m.group(1), m.group(2)
-        pairs = []
-        for item in body.split(','):
-            item = item.strip()
-            if not item:
-                continue
-            if '=' in item:
-                k, v = item.split('=', 1)
-                pairs.append((k.strip(), v.strip()))
-            else:
-                pairs.append((item, None))
-        lines = ['export const %s = {' % name]
-        for idx, (k, v) in enumerate(pairs):
-            lines.append('  %s: %s,' % (k, v if v is not None else str(idx)))
-        lines.append('} as const;')
-        lines.append('export type %s = typeof %s[keyof typeof %s];' % (name, name, name))
-        return '\n'.join(lines)
-    return ENUM_RE.sub(conv, text)
+    path = os.path.join(HERE, 'ets_files.txt')
+    with open(path, encoding='utf-8') as fh:
+        return [l.strip() for l in fh
+                if l.strip() and not l.strip().startswith('#')]
 
 
 def prepare():
-    """把真源码剥成 Node 能跑的 .ts（相对导入补 .ts 扩展名）"""
-    for f in FILES:
+    """把真源码剥成 Node 能跑的 .ts —— 逐文件委托 tools/ets_to_ts.py。"""
+    for f in load_files():
         src = os.path.join(ROOT, 'entry/src/main/ets', f + '.ets')
         dst = os.path.join(V, f + '.ts')
         os.makedirs(os.path.dirname(dst), exist_ok=True)
-        with open(src, encoding='utf-8') as fh:
-            text = fh.read()
-        with open(dst, 'w', encoding='utf-8') as fh:
-            text = ENUM_RE.sub(lambda m: _enum_cache(m), text) if False else strip_enums(text)
-            fh.write(STRIP.sub(lambda m: "from '%s.ts'" % m.group(1), text))
+        subprocess.run([sys.executable, os.path.join(HERE, 'ets_to_ts.py'), src, dst],
+                       check=True)
+    # @kit 桩：ets_to_ts.py 把 kit 导入重写到 '../kitstub/<name>.ts'，
+    # 桩本体在 tools/kitstubs/ 维护（与 run_selftest.sh 共用）。
+    dst = os.path.join(V, 'kitstub')
+    os.makedirs(dst, exist_ok=True)
+    for name in os.listdir(os.path.join(HERE, 'kitstubs')):
+        shutil.copy(os.path.join(HERE, 'kitstubs', name), os.path.join(dst, name))
 
 
 def write_hoststats_stub():
@@ -158,6 +130,21 @@ def overlap(a, b):
     small = min((a['right'] - a['left']) * (a['bottom'] - a['top']),
                 (b['right'] - b['left']) * (b['bottom'] - b['top']))
     return inter / small if small > 0 else 0.0
+
+
+def contained_and_deco(t, sx0, sy0, sx1, sy1):
+    """文字是否**完整落在色块内**且是**低透明装饰字**（±2px 容差）。
+
+    ★ 2026-10-31 C3：主题 13/14（AnimeHUD/NanoMuse）的 barWithWatermark 是
+    文档化设计——"轨道上叠一层 22% 透明的小字（如 CPU 14 核），既不占额外版面"。
+    完整在条内 + alpha < 0.7 → 内嵌水印，不算"压到"；
+    只有**跨界**（一半在条外）或**实心字**压条才是真问题
+    （当初用户实测的"电量压在内存条上"是实心标签跨界，仍会被抓）。
+    """
+    if t.get('alpha', 1) >= 0.7:
+        return False
+    return (t['left'] >= sx0 - 2 and t['right'] <= sx1 + 2
+            and t['top'] >= sy0 - 2 and t['bottom'] <= sy1 + 2)
 
 
 def main():
@@ -242,8 +229,20 @@ def main():
             #   发光、再画实色。两遍的内容与位置完全相同，只是透明度不同。
             #   桩记录不到 alpha（没进 TextBox），所以判据用"同文本 + 位置几乎相同"。
             #   不排除的话，一个 bigTile 就会报 6~8 条 98% 重叠的假问题。
+            #   ★ 2026-10-31 C3：容差 3px → 4px —— ThemeAnime 系的"故障色差"是
+            #   ±2px 两层（cx-2 青 / cx+2 品红 / cx 主色），同文本两两最远 4px，
+            #   3px 容差漏掉 ±2 两端的配对，一条色差报一条假重叠（实测 6 条）。
             if a['text'] == b['text'] \
-               and abs(a['left'] - b['left']) <= 3 and abs(a['top'] - b['top']) <= 3:
+               and abs(a['left'] - b['left']) <= 4 and abs(a['top'] - b['top']) <= 3:
+                continue
+            # ★ 2026-10-31 C3：**同文低透明叠加 = 手工辉光/立体影**。
+            #   这块画布没有 shadowBlur，主题 18 用 10 层 rgba(10,20,36,0.10~0.37)
+            #   逐层偏移 (2.4,1.8) 叠出"立体温度"，层间最远偏 21.6px ——
+            #   上面的 4px 容差罩不住。同字符串、至少一方 alpha<0.5 的重叠
+            #   是"影子贴着本体"（主题 13/14 的单层 text-shadow 同理），不算打架；
+            #   真问题是两个**不同**字符串、或两份**实心**字撞在一起。
+            if a['text'] == b['text'] \
+               and (a.get('alpha', 1) < 0.5 or b.get('alpha', 1) < 0.5):
                 continue
             r = overlap(a, b)
             if r >= 0.10:
@@ -255,7 +254,11 @@ def main():
     # 挑出"真正的分隔线"：Dashboard 自己的 roundRect 是拿 moveTo/lineTo 画的，
     # 它的四条边会成簇出现（端点与相邻竖直边重合）。分隔线则是一根孤立的横线 ——
     # 用"端点是否与其他线段共享"来区分，避免把"文字压在色块上"误报成"压线"。
-    segs = [(l['x1'], l['y1'], l['x2'], l['y2'], l.get('src', '')) for l in data['lines']]
+    # ★ 2026-10-31 C3：带上 alpha —— 背景纹理线（ThemeAnime 的 60px 网格、扫描线，
+    #   alpha 0.03~0.06）是"氛围"，压在上面是设计；结构分隔线才是"不能压"。
+    #   以前桩不记 alpha，网格线被当成分隔线，主题 10 报"文字压线"假问题。
+    segs = [(l['x1'], l['y1'], l['x2'], l['y2'], l.get('src', ''), l.get('alpha', 1))
+            for l in data['lines']]
     # 5) 文字压到"进度条"（用户实测发现"电量"压在内存条上，而文字-文字检查查不出来）
     #    进度条是 Dashboard 用自己的 roundRect 画的（内部走 moveTo/lineTo），所以不能只看 rects，
     #    要从线段里把"上下两条横线、间距 ≤22px、x 范围相近"的细长矩形认出来。
@@ -277,11 +280,19 @@ def main():
     for t in texts:
         if is_overlay(t):
             continue
+        # 内嵌水印（barWithWatermark，NanoMuse/AnimeHUD 的标志手法）：低透明小字
+        # 叠在进度条轨道上。水印常**横跨"填充段"和"轨道余段"**（如 '23859G' 右对齐
+        # 在轨道右端，而填充段只到 72% 处），对着填充段这半截看会误报 ——
+        # 所以判据是"完整落在**任一**条内"，而不是对每根条单独判。
+        wm = any(contained_and_deco(t, sx0, sy0, sx1, sy1)
+                 for (sx0, sy0, sx1, sy1, _k) in bar_rects)
         for (sx0, sy0, sx1, sy1, kind) in bar_rects:
             # 覆盖层（弹窗）自己的进度条也不算
             if any(is_overlay(o) and min(sx1, o['right']) - max(sx0, o['left']) > 3
                    and min(sy1, o['bottom']) - max(sy0, o['top']) > 2 for o in overlay):
                 break
+            if wm:
+                continue          # 文字是某根条的内嵌水印（见上），对着别的条也不算压
             ox = min(sx1, t['right']) - max(sx0, t['left'])
             oy = min(sy1, t['bottom']) - max(sy0, t['top'])
             if ox > 3 and oy > 2:
@@ -308,7 +319,12 @@ def main():
             continue
         shapes.append((r['x'], r['y'], r['x'] + r['w'], r['y'] + r['h'], r['kind']))
     for t in texts:
+        # 内嵌水印（同上）：完整落在任一形状条内且低透明 → 设计，不算压到
+        wm = any(contained_and_deco(t, sx0, sy0, sx1, sy1)
+                 for (sx0, sy0, sx1, sy1, _k) in shapes)
         for (sx0, sy0, sx1, sy1, kind) in shapes:
+            if wm:
+                continue
             ox = min(sx1, t['right']) - max(sx0, t['left'])
             oy = min(sy1, t['bottom']) - max(sy0, t['top'])
             if ox > 3 and oy > 3:
@@ -318,11 +334,13 @@ def main():
                 break
 
     hlines = []
-    for i, (x1, y1, x2, y2, src) in enumerate(segs):
+    for i, (x1, y1, x2, y2, src, alpha) in enumerate(segs):
         if abs(y1 - y2) > 0.5 or abs(x2 - x1) <= 40:
             continue
+        if alpha < 0.15:
+            continue          # 背景纹理线（网格/扫描线，alpha≤0.06）：压上面是设计
         shared = False
-        for j, (a1, b1, a2, b2, _s) in enumerate(segs):
+        for j, (a1, b1, a2, b2, _s, _alpha2) in enumerate(segs):
             if i == j:
                 continue
             for (px, py) in ((x1, y1), (x2, y2)):

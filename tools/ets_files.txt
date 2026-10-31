@@ -1,0 +1,51 @@
+# ets_files.txt —— 离线自检（run_selftest.sh）与布局审计（layout_check.py）共用的转译清单
+#
+# ★ 2026-10-31 C3 起两份工具都读这一份文件（此前各自维护一份，漏同步翻车三次：
+#   ThemeDotiiCell 漏过、ThemeSnake/mario 整条链漏过、ThemeAnime 漏过导致主题 10 审计崩溃）。
+# 新增 render/service/mario/common 模块后必须加进来 —— 否则依赖它的工具会
+# ERR_MODULE_NOT_FOUND 或静默回落到错误主题。
+# 注意：service/HostStats 不在本清单 —— 它有三个 kit 依赖，layout_check.py 直接写
+# 确定性桩（write_hoststats_stub）。
+
+usb/LyProtocol
+usb/EndpointPick
+usb/SelfTest
+common/Types
+common/Normalize
+common/SystemMerge
+common/Theme
+common/History
+common/Toasts
+common/Extras
+common/Logger
+service/CanvasCalib
+service/SchedulePolicy
+service/WeatherService
+render/Chrome
+render/Dashboard
+render/Overlay
+render/ThemeDiag
+render/ThemeWall
+render/ThemePages
+render/ThemePong
+render/ThemeDotii
+render/ThemeFwSim
+render/ThemeTRCC
+render/ThemeMac
+render/ThemeDotiiCell
+render/ThemeAnime
+render/ThemeAnimeBG
+render/ThemeAnimeFree
+render/ThemeAnimeHUD
+render/ThemeNanoMuse
+render/ThemeTrofeoRust
+render/ThemeSnake
+render/ThemeWeather
+render/Backdrop
+mario/Types
+mario/Levels
+mario/Entities
+mario/Game
+mario/Input
+mario/Audio
+mario/MarioDemo

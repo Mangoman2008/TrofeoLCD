@@ -33,6 +33,7 @@ KIT_RE = re.compile(r"from '(@kit\.[A-Za-z0-9_.]+)'")
 KIT_RE = re.compile(r"import\s+(type\s+)?(\{[^}]*\})\s*from\s+'(@kit\.[A-Za-z0-9_.]+)'")
 KIT_STUBS = {
     '@kit.PerformanceAnalysisKit': 'hilog',
+    '@kit.NetworkKit': 'http',
 }
 
 

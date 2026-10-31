@@ -10,6 +10,39 @@ import type { Toast } from '../common/Toasts';
 import { C, F } from '../common/Theme';
 
 export class Chrome {
+  // ---------------- 渐变缓存 ----------------
+  /**
+   * ★ 渐变缓存（2026-10-31 审计 C2）。
+   *
+   * 背景/曲线/暗角每帧都 createXxxGradient：一次对象分配 + addColorStop 的字符串
+   * 解析，每帧 ×（背景 2 + 暗角 1 + 曲线 N）次 —— 而参数在帧间几乎不变，纯浪费。
+   * 按"几何 + 颜色"拼 key 缓存 CanvasGradient 对象，命中即零开销。
+   *
+   * · 上限 32：满了整体清空（代价只是之后逐个重建，单次 <0.01ms，不值得 LRU）。
+   * · ctx 变了整体作废：规范上 gradient 不绑定 ctx，但 ArkUI 原生实现未必；
+   *   画布重建/分辨率变化后旧对象不可信，宁可重建。
+   */
+  private static gradOwner: CanvasRenderingContext2D | null = null;
+  private static gradCache: Map<string, CanvasGradient> = new Map();
+
+  private static gradient(ctx: CanvasRenderingContext2D, key: string,
+                          make: () => CanvasGradient): CanvasGradient {
+    if (Chrome.gradOwner !== ctx) {
+      Chrome.gradOwner = ctx;
+      Chrome.gradCache.clear();
+    }
+    const hit = Chrome.gradCache.get(key);
+    if (hit !== undefined) {
+      return hit;
+    }
+    const g = make();
+    if (Chrome.gradCache.size >= 32) {
+      Chrome.gradCache.clear();
+    }
+    Chrome.gradCache.set(key, g);
+    return g;
+  }
+
   // ---------------- 背景 ----------------
   /**
    * 画背景：有背景图就画图（压暗 + 冷色蒙板），否则用主题自带渐变。
@@ -22,15 +55,21 @@ export class Chrome {
       ctx.fillStyle = `rgba(3,6,12,${tint.toFixed(2)})`;
       ctx.fillRect(0, 0, w, h);
     } else {
-      const g = ctx.createLinearGradient(0, 0, 0, h);
-      g.addColorStop(0, C.bgTop);
-      g.addColorStop(1, C.bgBot);
+      const g = Chrome.gradient(ctx, `bg|${h}|${C.bgTop}|${C.bgBot}`, () => {
+        const lg = ctx.createLinearGradient(0, 0, 0, h);
+        lg.addColorStop(0, C.bgTop);
+        lg.addColorStop(1, C.bgBot);
+        return lg;
+      });
       ctx.fillStyle = g;
       ctx.fillRect(0, 0, w, h);
       // 左上角一抹主题色光晕：纯渐变太平，加一点层次
-      const rg = ctx.createRadialGradient(w * 0.18, -h * 0.25, 10, w * 0.18, -h * 0.25, h * 1.5);
-      rg.addColorStop(0, 'rgba(88,166,255,0.10)');
-      rg.addColorStop(1, 'rgba(88,166,255,0)');
+      const rg = Chrome.gradient(ctx, `halo|${w}|${h}`, () => {
+        const rad = ctx.createRadialGradient(w * 0.18, -h * 0.25, 10, w * 0.18, -h * 0.25, h * 1.5);
+        rad.addColorStop(0, 'rgba(88,166,255,0.10)');
+        rad.addColorStop(1, 'rgba(88,166,255,0)');
+        return rad;
+      });
       ctx.fillStyle = rg;
       ctx.fillRect(0, 0, w, h);
     }
@@ -68,10 +107,15 @@ export class Chrome {
     ctx.save();
     ctx.translate(cx, cy);
     ctx.scale(rx / ry, 1);
-    const g = ctx.createRadialGradient(0, 0, 0, 0, 0, ry);
-    g.addColorStop(0, `rgba(0,0,0,${a0.toFixed(3)})`);
-    g.addColorStop(0.5, `rgba(0,0,0,${(a0 * 0.45).toFixed(3)})`);
-    g.addColorStop(1, 'rgba(0,0,0,0)');
+    // ★ C2：渐变本体只依赖 a0 与 ry（中心 (0,0)、半径 ry，坐标系由 paint 时的
+    //   translate/scale 决定），按这两者缓存
+    const g = Chrome.gradient(ctx, `vig|${a0.toFixed(3)}|${ry.toFixed(1)}`, () => {
+      const vg = ctx.createRadialGradient(0, 0, 0, 0, 0, ry);
+      vg.addColorStop(0, `rgba(0,0,0,${a0.toFixed(3)})`);
+      vg.addColorStop(0.5, `rgba(0,0,0,${(a0 * 0.45).toFixed(3)})`);
+      vg.addColorStop(1, 'rgba(0,0,0,0)');
+      return vg;
+    });
     ctx.fillStyle = g;
     ctx.fillRect(-rx, -ry, rx * 2, ry * 2);
     ctx.restore();
@@ -165,9 +209,12 @@ export class Chrome {
       ctx.lineTo(lastX, y + h);
       ctx.lineTo(firstX, y + h);
       ctx.closePath();
-      const g = ctx.createLinearGradient(0, y, 0, y + h);
-      g.addColorStop(0, Chrome.alpha(color, 0.28));
-      g.addColorStop(1, Chrome.alpha(color, 0.02));
+      const g = Chrome.gradient(ctx, `spark|${y}|${h}|${color}`, () => {
+        const sg = ctx.createLinearGradient(0, y, 0, y + h);
+        sg.addColorStop(0, Chrome.alpha(color, 0.28));
+        sg.addColorStop(1, Chrome.alpha(color, 0.02));
+        return sg;
+      });
       ctx.fillStyle = g;
       ctx.fill();
     }

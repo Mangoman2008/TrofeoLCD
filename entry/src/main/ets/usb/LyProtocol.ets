@@ -36,6 +36,26 @@ export const PID_LY1: number = 0x5409;
 export const VENDOR_ID: number = 0x0416;
 
 /**
+ * ★ 分块流复用缓冲（2026-10-31 审计 C1：buildChunkStream 零拷贝化）。
+ *
+ * 原实现每帧 `new Uint8Array(paddedChunks * 512)`：100KB 帧就是 ~104KB/帧的分配，
+ * 连续推帧下 MB/s 级的持续垃圾、全压在 young-gen GC 上。改为模块级**只增不缩**缓冲：
+ * 容量不足才重新分配，平时只返回精确长度的 subarray 视图，块内数据用 set() 整段拷贝。
+ *
+ * 复用安全性（为什么不会出现"上一帧的流被下一帧覆写"）：
+ *   1. buildChunkStream 的调用方只有 LcdUsb.sendJpeg（stream 是局部变量，不外泄）
+ *      和 SelfTest 的 KAT（同步断言，用完即弃）。
+ *   2. sendJpeg 严格单飞：普通推帧 pushInFlight（LcdService:3604）、流水线 pushBusy
+ *      背压丢帧（:3622）、序列推帧 pushBusy+pushInFlight 双护栏（:3822），三条路径
+ *      互斥 —— 任意时刻至多一个 sendJpeg 在途，上一帧的流必然已全部 bulkTransfer
+ *      完，缓冲才会被下一次 buildChunkStream 复用。
+ *   3. bulkTransfer 在调用时同步完成 JS→native 的缓冲区拷贝，之后不持有 JS 侧引用。
+ *
+ * 上界：MAX_JPEG_SIZE=450000 → 缓冲最大 ~464KB，一次分配后常驻复用。
+ */
+let chunkStreamBuf: Uint8Array = new Uint8Array(0);
+
+/**
  * PM -> FBL 覆写表（对应 trcc core/protocol.py 的 _PM_TO_FBL_OVERRIDES）
  * 68 -> 192（1280x480）、69 -> 192（1920x440）、65/66 -> 192、64/63 -> 114
  */
@@ -185,7 +205,12 @@ export class LyProtocol {
       }
     }
 
-    const out = new Uint8Array(paddedChunks * CHUNK_SIZE);
+    // ★ C1：复用模块级缓冲（见 chunkStreamBuf 的注释）——容量不足才扩，平时零分配
+    const need: number = paddedChunks * CHUNK_SIZE;
+    if (chunkStreamBuf.length < need) {
+      chunkStreamBuf = new Uint8Array(need);
+    }
+    const out = chunkStreamBuf.subarray(0, need);
     const view = new DataView(out.buffer);
 
     for (let i = 0; i < numChunks; i++) {
@@ -202,10 +227,17 @@ export class LyProtocol {
       view.setUint16(off + 11, i, true);
       // [13..15] 保持 0
 
+      // ★ C1：set() 整段拷贝替代逐字节循环（TypedArray.set 走 memcpy，快一个数量级）
       const srcOff = i * CHUNK_DATA_SIZE;
-      for (let k = 0; k < dataLen; k++) {
-        out[off + CHUNK_HEADER_SIZE + k] = jpeg[srcOff + k];
-      }
+      out.set(jpeg.subarray(srcOff, srcOff + dataLen), off + CHUNK_HEADER_SIZE);
+    }
+
+    // ★ C1 复用收尾：尾块 dataLen 之后的残区 + 补齐块，在**复用**时留着上一帧的字节。
+    //   新分配的 buffer 天生全 0，复用的不是 —— 必须显式清零，保证与旧实现逐字节一致
+    //   （设备按块头 dataLen 读，理论上不看残区，但别赌固件真的不看）。
+    const residueFrom = (numChunks - 1) * CHUNK_SIZE + CHUNK_HEADER_SIZE + (total % CHUNK_DATA_SIZE);
+    if (residueFrom < need) {
+      out.fill(0, residueFrom, need);
     }
     return out;
   }
@@ -243,7 +275,10 @@ export class LyProtocol {
         //   那一帧永远解不出来 → 偶发"画面不刷新/需要重发才显示"）。
         size = (pid === PID_LY) ? Math.min(2048, remaining) : remaining;
       }
-      writes.push(chunkStream.slice(pos, pos + size));
+      // ★ C1：subarray 视图替代 slice 拷贝（4096B × ~25 次/帧 → 零拷贝）。
+      //   安全：视图只被 sendJpeg 的 bulkTransfer 消费（调用时即完成 native 拷贝），
+      //   单飞护栏保证底层缓冲不会在消费期间被复用（见 chunkStreamBuf 注释）。
+      writes.push(chunkStream.subarray(pos, pos + size));
       // 按**实际发送长度**推进（本行原来是 pos += ws，是丢帧尾的根因）
       pos += size;
     }

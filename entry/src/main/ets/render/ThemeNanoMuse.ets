@@ -240,8 +240,11 @@ export class ThemeNanoMuse {
     ctx.textAlign = 'right';
     ctx.font = '22px sans-serif';
     ctx.fillStyle = N_T3;
+    // ★ 2026-10-31 布局审计修：原锚 W-PAD-168 → 日期右缘 1736、左缘 1625，
+    //   会伸进时钟（右缘 1668，bold 38px '11:33'）43px，时钟后画直接盖住 '10/'。
+    //   改 -100：右缘 1804 / 左缘 1693，距时钟 25px、距 ON/OFF 27px。
     ctx.fillText(`${pad(d.getMonth() + 1)}/${pad(d.getDate())} 周${wk[d.getDay()]}`,
-      W - PAD - 168, ly + 2);
+      W - PAD - 100, ly + 2);
     ctx.font = 'bold 38px monospace';
     ctx.fillStyle = N_T1;
     ctx.fillText(`${pad(d.getHours())}:${pad(d.getMinutes())}`, W - PAD - 236, ly);
@@ -366,15 +369,18 @@ export class ThemeNanoMuse {
     ThemeNanoMuse.roundRect(ctx, x + 0.5, y + 0.5, w - 1, h - 1, 14);
     ctx.stroke();
 
-    // ★ 实测修正：72px 的值 + 24px 的标签在 92px 高的格子里**必然重叠**
-    //   （原标签 y+26、值 y+h-48=y+44 → 只差 18px，值字高 72 → 压住标签）。
-    //   修法：标签贴顶（y+22），值贴底（y+h-40），中间留出 24px 净空。
+    // ★ 实测修正（2026-10-31 二修）：原注释"中间留出 24px 净空"算的是
+    //   标签中心(y+22)到值中心(y+52)的距离，不是包络净空 ——
+    //   值 72px 半高 26 → 顶到 y+26，标签 24px 半高 8.6 → 底到 y+30.6，
+    //   包络咬合 4.6px（标签 'C/P/U' 左端正好压在值 '6' 的顶上）。
+    //   修法：标签 y+20、值中心 y+h-34 → 标签底 28.6 / 值顶 32.1，净空 3.5px；
+    //   值底 y+84 距格底 92 还有 8px。
     ctx.textBaseline = 'middle';
     ctx.textAlign = 'left';
-    ThemeNanoMuse.tracked(ctx, label, x + 18, y + 22, F_LABEL, N_T3, 5);
+    ThemeNanoMuse.tracked(ctx, label, x + 18, y + 20, F_LABEL, N_T3, 5);
     // 值：先画一层青色低透明（近似 `.fleet-val` 的 text-shadow 发光）
     ctx.font = `bold ${F_BIG}px monospace`;
-    const vy = y + h - 40;
+    const vy = y + h - 34;
     ctx.globalAlpha = 0.20;
     ctx.fillStyle = N_CYAN;
     ctx.fillText(val, x + 20, vy);

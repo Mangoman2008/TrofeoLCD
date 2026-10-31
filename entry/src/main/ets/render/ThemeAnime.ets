@@ -215,11 +215,16 @@ export class ThemeAnime {
 
     // 日文片假名（竖排小字，贴在标题右侧；纯装饰）
     if (kana.length > 0) {
+      // ★ 2026-10-31 审计修复：标题宽度必须在切到 11px **之前**量。
+      //   原实现先 ctx.font = '11px' 再 measureText(title)，量出来的是 11px 的
+      //   宽度（比 bold 21px 窄一半）→ 片假名列整体左移、压到标题右缘
+      //   （布局审计 --theme=10 报 11 条重叠，全是这个测量错位）。
+      const titleW = ctx.measureText(title).width;
       ctx.font = '11px sans-serif';
       ctx.globalAlpha = 0.55;
       ctx.fillStyle = A_TEXT_S;
       ctx.textAlign = 'left';
-      const kx = cx + ctx.measureText(title).width / 2 + 10;
+      const kx = cx + titleW / 2 + 10;
       for (let i = 0; i < kana.length && i < 6; i++) {
         ctx.fillText(kana.substring(i, i + 1), kx, ty - 14 + i * 13);
       }

@@ -16,26 +16,18 @@ done
 rm -f "$V/run.mts"
 mkdir -p "$V/usb" "$V/common" "$V/service" "$V/render" "$V/mario" "$V/node_modules"
 
-# ★ 工程里新增 render/ 或 common/ 模块后，**必须**把文件加进下面这个清单 ——
-#   否则 Dashboard 之类 import 到它时会 ERR_MODULE_NOT_FOUND，自检整段失败。
-#   （踩过三次：layout_check.py 与这里都漏过 ThemeDotiiCell；2026-10-31 又漏了
-#    ThemeSnake/mario 整条链 —— 主题 16/17 上线时没同步这里，自检静默失效了一轮）
-for f in usb/LyProtocol usb/EndpointPick usb/SelfTest common/Types common/Normalize common/SystemMerge service/CanvasCalib service/SchedulePolicy common/Theme common/History common/Toasts common/Extras render/Chrome render/Dashboard render/ThemeDiag render/ThemeWall \
-         render/ThemePong render/ThemeDotii render/ThemeFwSim render/ThemeTRCC render/ThemeMac render/ThemeDotiiCell render/ThemeAnime render/ThemeAnimeBG render/ThemeAnimeFree render/ThemeAnimeHUD render/ThemeNanoMuse render/ThemeTrofeoRust \
-         render/ThemeSnake render/Backdrop \
-         mario/Types mario/Levels mario/Entities mario/Game mario/Input mario/Audio mario/MarioDemo; do
+# ★ 转译清单与 layout_check.py 共用 tools/ets_files.txt（2026-10-31 C3）：
+#   此前两边各维护一份，漏同步翻车三次（ThemeDotiiCell / ThemeSnake+mario 链 / ThemeAnime）。
+#   新增模块只改那一份。
+while IFS= read -r f; do
+  case "$f" in ''|'#'*) continue ;; esac
   python3 "$D/tools/ets_to_ts.py" "$D/entry/src/main/ets/$f.ets" "$V/$f.ts"
-done
+done < "$D/tools/ets_files.txt"
 
-# ★ @kit 打桩（2026-10-31 补）：mario/Game 顶层 `import { hilog } from '@kit.PerformanceAnalysisKit'`。
-#   ets_to_ts.py 会把它重写成 '../kitstub/hilog.ts'（见那边的 KIT_STUBS 表），这里负责落桩文件。
-#   以后有新 kit 依赖时：ets_to_ts.py 的 KIT_STUBS 加映射 + 这里加对应桩文件。
+# ★ @kit 打桩：ets_to_ts.py 把 kit 导入重写到 '../kitstub/<name>.ts'（KIT_STUBS 表），
+#   桩文件本体在 tools/kitstubs/ 下维护（与 layout_check.py 共用），这里只负责拷贝。
 mkdir -p "$V/kitstub"
-cat > "$V/kitstub/hilog.ts" <<'TS'
-// 离线自检桩：hilog 是真机日志 API（mario/Game 的调试日志走它），全部 no-op。
-const noop = (): void => {};
-export const hilog = { debug: noop, info: noop, warn: noop, error: noop, fatal: noop };
-TS
+cp "$D"/tools/kitstubs/*.ts "$V/kitstub/"
 
 cp "$D/tools/selftest_runner.mts" "$V/run.mts"
 cd "$V"

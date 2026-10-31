@@ -75,11 +75,18 @@ export class ThemeWeather {
   private static inited: boolean = false;
 
   /**
-   * ★ 字号系数：实测本工程画布把 `ctx.font` 的 px 渲染成约 **0.5 倍**的实际高度
-   *   （例：font 60px 的「北京」只画出 30px 高、font 80px 的「晴」只画出 39px）。
-   *   所以统一在这里乘一个系数，一处调、全屏生效。
+   * ★ 字号系数：2026-10-31 布局审计改 **1.0**（原 1.85）。
+   *
+   * 原注释声称"本工程画布把 ctx.font 的 px 渲染成约 0.5 倍实际高度"——这个前提
+   * 是**错的**：F.scale=2.5 的注释（Theme.ets）用 px/mm 实测过设备按 1:1 渲染
+   * （"正文 16px ≈ 2mm 字高"），LcdService 的 ctx.scale(1920→画布vp) 也把字号
+   * 随变换一起缩放。1.85 补偿下真机实际渲染 1.85×：278px 时钟顶被裁掉 62px、
+   * 温度/条件/体感三行互相咬合、体感行横穿 7 天面板、相邻日期标签互叠
+   * （layout_check --theme=18 69 条）。全部 f(x) 的**版面坐标本来就是按
+   * "x px 字号"设计的**（本文件 :202 注释"时钟 150px 约占屏高 1/4"=150/462
+   * 才成立），去掉补偿即恢复设计意图；排版审计以标准字体度量验证通过。
    */
-  static FS: number = 1.85;
+  static FS: number = 1.0;
 
   private static f(px: number, bold: boolean = false): string {
     const v: number = Math.round(px * ThemeWeather.FS);

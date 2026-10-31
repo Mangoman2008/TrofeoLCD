@@ -2011,7 +2011,11 @@ export class SuperMarioGame {
     }
     ctx.font = '18px sans-serif';
     ctx.fillStyle = '#E8E8E8';
-    ctx.fillText('← → 选择    Enter / 空格 确认', w / 2, h * 0.86);
+    // ★ 0.86→0.90（2026-10-31 布局审计）：名字行在 cy+70（0.52h+70），
+    //   提示行原在 0.86h —— 名字半高 7.2 + 提示半高 6.5 = 13.7，
+    //   而 0.86h-（0.52h+70）在 231 高的视口里只有 8.5px，包络咬合 ~5px，
+    //   ×2 全屏后肉眼可见压字；0.90h 拉开到 17.8px，240 高的 VM 视口同理。
+    ctx.fillText('← → 选择    Enter / 空格 确认', w / 2, h * 0.90);
     ctx.textAlign = 'left';
     ctx.textBaseline = 'alphabetic';
   }
