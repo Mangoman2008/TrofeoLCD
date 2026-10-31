@@ -154,16 +154,10 @@ export class RuntimeCheck {
   /**
    * 一句话总结：全绿 / N 项不通过（列出名字，方便贴群里）。
    *
-   * ★ 会带上"数据桥"那一项的判据数值：健康表一旦撒谎（实测出现过报 6/6
-   *   而 /diag 的 bridgeAgeSec 明明是 -1），日志里就能立刻定位是哪项输入不对。
+   * ★ 判据数值不在这里：数据桥那项的明细由独立的 bridgeProbe() 提供
+   *   （2026-10-31 审计 B7：这里原来有一段算了却从不使用的死循环）。
    */
   static summary(items: TestItem[]): string {
-    let bridgeProbe: string = '';
-    for (const it of items) {
-      if (it.name === '数据桥遥测') {
-        bridgeProbe = ' ' + it.detail;
-      }
-    }
     let pass: number = 0;
     const fails: string[] = [];
     for (const it of items) {

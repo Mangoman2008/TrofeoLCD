@@ -2081,7 +2081,7 @@ export class LcdService {
       // ★ 边框扫光（Overlay.sweepBorder，默认天气主题 + /set?sweep=2 强制全局）：
       //   光带位置由 Date.now() 对 sweepLapMs（默认 12s）取相驱动。签名里原来没有
       //   这一项 → 静态主题上扫光只能靠 3s 心跳动一下（2026-10-31 修，审计【中】）。
-      //   250ms 粒度与天气主题的 wxq= 对齐（4 步/秒，12s 一圈 ≈ 每步挪 ~1% 圈长，够顺）。
+      //   250ms 粒度与天气主题的 wxq= 对齐（4 步/秒，12s 一圈 ≈ 每步挪 ~2% 圈长，够顺）。
       //   判定式与真正绘制处（Overlay.sweepBorder 的调用点）严格一致，别只判 sweepOn。
       `sw=${this.sweepOn && (this.theme === 18 || this.sweepForce)
         ? Math.floor(Date.now() / 250) : 0}`,

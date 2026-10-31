@@ -326,7 +326,12 @@ export class ThemeSnake {
     }
     // 死亡 → 停 RESTART_MS 后重开（源实现的做法）
     if (st.state === ST_OVER) {
-      if (st.deadUntil > 0 && nowMs >= st.deadUntil) {
+      // ★ 兜底（2026-10-31 审计 B6）：deadUntil 没被 advance 置上（比如
+      //   外部把 state 直接改成 ST_OVER）时，蛇会永远躺尸不复活。
+      if (st.deadUntil <= 0) {
+        st.deadUntil = nowMs + RESTART_MS;
+      }
+      if (nowMs >= st.deadUntil) {
         ThemeSnake.reset(st, nowMs, st.cols, st.rows);
         return true;
       }

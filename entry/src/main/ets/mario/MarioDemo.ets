@@ -8,8 +8,9 @@
  * ── 自动驾驶策略 ──────────────────────────────────────────
  *   · 坑 / 墙：满高度跳（按住 JUMP 约 0.25s）
  *   · **敌人：矮跳去踩**（只按约 0.07s，靠 JUMP_CUT 压低弧线，落点正好在它头上）
- *   · 卡住超过 1.2s：补一次满高度跳
- *   判断依据是 `Game.hazardAhead()`（移植版新增），它区分 坑/墙/敌人。
+ *   · 卡住超过 3s：补一次满高度跳
+ *   判断依据是 `Game.demoSense()`（移植版新增）的一次性传感器读数
+ *   （onGround/前方坑宽/敌人距离/墙壁距离）。
  *
  * ── 视口 ────────────────────────────────────────────────
  *   `draw()` 支持传入逻辑视口尺寸。这块屏是 1920×462（4.16:1），
@@ -17,7 +18,7 @@
  *   游戏本来就把 (w,h) 当"可视世界范围"，所以它只是看到了更宽的一条关卡切片。
  */
 
-import { SuperMarioGame, HAZARD_ENEMY, HAZARD_PIT, HAZARD_WALL } from './Game';
+import { SuperMarioGame } from './Game';
 import { InputManager } from './Input';
 import { SoundManager } from './Audio';
 import { GameAction } from './Types';
@@ -42,8 +43,6 @@ const TAP_START_MS: number = 800;
 const STUCK_JUMP_MS: number = 1200;
 /** x 多久没前进就判定为"卡住"（门槛更低、更积极） */
 const PROGRESS_STALL_MS: number = 260;
-/** 连续跳跃的最小间隔（防止每帧都起跳把动作糊在一起） */
-const JUMP_COOLDOWN_MS: number = 240;
 /** 水下：多久给一次上浮（太密会一直飘到天花板） */
 const WATER_HOP_MS: number = 900;
 

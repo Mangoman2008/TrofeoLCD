@@ -69,7 +69,6 @@ function condDot(c: WxCond): string {
 }
 
 export class ThemeWeather {
-  private static lastMs: number = 0;
   private static px: number[] = [];
   private static py: number[] = [];
   private static pz: number[] = [];
@@ -106,7 +105,6 @@ export class ThemeWeather {
 
   static render(ctx: CanvasRenderingContext2D, nowMs: number, d: WeatherData): void {
     ThemeWeather.init();
-    ThemeWeather.lastMs = nowMs;
 
     const now = new Date(nowMs);
     const hour: number = now.getHours();
@@ -121,7 +119,7 @@ export class ThemeWeather {
     ThemeWeather.left(ctx, nowMs, d, now);
     const isNight: boolean = hour < 6 || hour >= 19;
     ThemeWeather.center(ctx, nowMs, d, cond, isNight);
-    ThemeWeather.right(ctx, nowMs, d);
+    ThemeWeather.right(ctx, d);
 
     ctx.globalAlpha = 0.45;
     ctx.fillStyle = 'rgb(120,200,255)';
@@ -382,12 +380,10 @@ export class ThemeWeather {
     }
 
     ThemeWeather.icon(ctx, 1188, 168, c, nowMs, isNight);
-
-    void nowMs;
   }
 
   // ---------------------------------------------------------------- 右：24h + 7 天
-  private static right(ctx: CanvasRenderingContext2D, nowMs: number, d: WeatherData): void {
+  private static right(ctx: CanvasRenderingContext2D, d: WeatherData): void {
     const x0: number = 1300;
     const x1: number = W - 30;
 
@@ -457,7 +453,6 @@ export class ThemeWeather {
       ctx.fillStyle = 'rgba(212,230,243,0.97)';
       ctx.fillText(i === 0 ? '今天' : `+${i}天`, bx, 436);
     }
-    void nowMs;
   }
 
   // ---------------------------------------------------------------- 图标

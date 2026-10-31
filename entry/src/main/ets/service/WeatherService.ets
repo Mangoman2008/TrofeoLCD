@@ -128,16 +128,27 @@ export class WeatherService {
   }
 
   /**
-   * 帧循环每帧调用：到点才发请求，**从不阻塞**。
-   * @returns true 表示这次调用发起了一次刷新（供内容签名用）
+   * 记一次取数失败（统一出口：计数 + 错误文案 + 日志）。
+   * 2026-10-31 审计 B3：原来只有网络异常的 catch 才计数，HTTP 非 200 /
+   * 空响应 / JSON 坏 / 缺 current 这些路径只写 errText 不计数 ——
+   * "第 N 次失败"的日志与实际失败次数对不上。
    */
-  tick(nowMs: number): boolean {
+  private noteFail(text: string): void {
+    this.failCount++;
+    this.data.errText = text;
+    Logger.w(`天气取数失败（第 ${this.failCount} 次）: ${text}`);
+  }
+
+  /**
+   * 帧循环每帧调用：到点才发请求，**从不阻塞**。
+   */
+  tick(nowMs: number): void {
     if (this.busy) {
-      return false;
+      return;
     }
     const interval: number = this.data.ok ? REFRESH_MS : RETRY_MS;
     if (this.lastTryMs > 0 && nowMs - this.lastTryMs < interval) {
-      return false;
+      return;
     }
     this.lastTryMs = nowMs;
     this.busy = true;
@@ -145,11 +156,8 @@ export class WeatherService {
       this.busy = false;
     }).catch((e: Object) => {
       this.busy = false;
-      this.failCount++;
-      this.data.errText = Logger.safe(e);
-      Logger.w(`天气取数失败（第 ${this.failCount} 次）: ${this.data.errText}`);
+      this.noteFail(Logger.safe(e));
     });
-    return true;
   }
 
   private buildUrl(): string {
@@ -174,7 +182,7 @@ export class WeatherService {
         expectDataType: http.HttpDataType.STRING
       });
       if (resp.responseCode !== 200) {
-        this.data.errText = `HTTP ${resp.responseCode}`;
+        this.noteFail(`HTTP ${resp.responseCode}`);
         return;
       }
       const body: string = typeof resp.result === 'string' ? resp.result : '';
@@ -187,23 +195,23 @@ export class WeatherService {
   /** 解析 Open-Meteo 返回（只取需要的字段，字段缺失就跳过） */
   parse(body: string): void {
     if (body.length < 32) {
-      this.data.errText = '空响应';
+      this.noteFail('空响应');
       return;
     }
     let j: Record<string, Object> | null = null;
     try {
       j = JSON.parse(body) as Record<string, Object>;
     } catch (e) {
-      this.data.errText = 'JSON 解析失败';
+      this.noteFail('JSON 解析失败');
       return;
     }
     if (j === null) {
-      this.data.errText = 'JSON 为空';
+      this.noteFail('JSON 为空');
       return;
     }
     const cur = j['current'] as Record<string, number> | undefined;
     if (cur === undefined) {
-      this.data.errText = '缺少 current';
+      this.noteFail('缺少 current');
       return;
     }
     const num = (o: Record<string, number> | undefined, k: string, d: number): number => {
@@ -222,45 +230,59 @@ export class WeatherService {
     this.data.windDeg = num(cur, 'wind_direction_10m', 0);
 
     // 24 小时温度：取 current.time 之后最近的 24 个点
+    // ★ 时区修复（2026-10-31 审计 B2）：hourly.time 是**本地时间**标签
+    //   （请求带 timezone=auto），原来拿 UTC 的 new Date().toISOString() 去对齐，
+    //   东八区下起点偏早 8 小时 —— "未来 24h"曲线混进 8 小时历史、末尾 8 小时被截掉。
+    //   current.time 与 hourly.time 同为本地标签，直接可比；缺失时回落旧行为。
+    // ★ 逐元素校验（B3）：数组元素坏值就地兜底为 0 而不是丢弃 ——
+    //   丢弃会让 temperature 与 time 两条数组错位，曲线整体平移。
     const hourly = j['hourly'] as Record<string, Object> | undefined;
-    if (hourly !== undefined) {
-      const hT = hourly['temperature_2m'] as number[] | undefined;
-      const hTime = hourly['time'] as string[] | undefined;
-      if (hT !== undefined && hT.length > 0) {
-        let start: number = 0;
-        const nowIso: string = new Date().toISOString().substring(0, 13);
-        if (hTime !== undefined) {
-          for (let i = 0; i < hTime.length; i++) {
-            if (hTime[i].substring(0, 13) >= nowIso) {
-              start = i;
-              break;
-            }
-          }
+    if (hourly !== undefined && Array.isArray(hourly['temperature_2m'])
+        && (hourly['temperature_2m'] as Object[]).length > 0) {
+      const hT: Object[] = hourly['temperature_2m'] as Object[];
+      const hTime: Object[] = Array.isArray(hourly['time']) ? hourly['time'] as Object[] : [];
+      const curTime: Object | undefined = (j['current'] as Record<string, Object>)['time'];
+      const nowKey: string = typeof curTime === 'string'
+        ? curTime.substring(0, 13) : new Date().toISOString().substring(0, 13);
+      let start: number = 0;
+      for (let i = 0; i < hTime.length && i < hT.length; i++) {
+        const t = hTime[i];
+        if (typeof t === 'string' && t.substring(0, 13) >= nowKey) {
+          start = i;
+          break;
         }
-        const out: number[] = [];
-        for (let i = start; i < hT.length && out.length < 24; i++) {
-          out.push(hT[i]);
-        }
-        this.data.hourly = out;
       }
+      const out: number[] = [];
+      for (let i = start; i < hT.length && out.length < 24; i++) {
+        const v = hT[i];
+        out.push(typeof v === 'number' && Number.isFinite(v) ? v : 0);
+      }
+      this.data.hourly = out;
     }
-    // 7 天
+    // 7 天（同样逐元素兜底）
     const daily = j['daily'] as Record<string, Object> | undefined;
-    if (daily !== undefined) {
-      const dMin = daily['temperature_2m_min'] as number[] | undefined;
-      const dMax = daily['temperature_2m_max'] as number[] | undefined;
-      const dCode = daily['weather_code'] as number[] | undefined;
-      if (dMin !== undefined && dMax !== undefined) {
-        this.data.dMin = dMin.slice(0, 7);
-        this.data.dMax = dMax.slice(0, 7);
-        const cs: WxCond[] = [];
-        if (dCode !== undefined) {
-          for (let i = 0; i < dCode.length && i < 7; i++) {
-            cs.push(condOf(dCode[i]));
-          }
-        }
-        this.data.dCond = cs;
+    if (daily !== undefined && Array.isArray(daily['temperature_2m_min'])
+        && Array.isArray(daily['temperature_2m_max'])) {
+      const dMin: Object[] = daily['temperature_2m_min'] as Object[];
+      const dMax: Object[] = daily['temperature_2m_max'] as Object[];
+      const dCode: Object[] = Array.isArray(daily['weather_code'])
+        ? daily['weather_code'] as Object[] : [];
+      const fin = (v: Object): number => (typeof v === 'number' && Number.isFinite(v) ? v : 0);
+      const mn: number[] = [];
+      const mx: number[] = [];
+      for (let i = 0; i < dMin.length && i < 7; i++) {
+        mn.push(fin(dMin[i]));
       }
+      for (let i = 0; i < dMax.length && i < 7; i++) {
+        mx.push(fin(dMax[i]));
+      }
+      this.data.dMin = mn;
+      this.data.dMax = mx;
+      const cs: WxCond[] = [];
+      for (let i = 0; i < dCode.length && i < 7; i++) {
+        cs.push(condOf(fin(dCode[i])));
+      }
+      this.data.dCond = cs;
     }
     this.data.ok = true;
     this.data.atMs = Date.now();

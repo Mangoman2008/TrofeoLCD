@@ -1,4 +1,4 @@
-import { runningLock, BusinessError } from '@kit.BasicServicesKit';
+import { runningLock } from '@kit.BasicServicesKit';
 import { Logger } from '../common/Logger';
 
 /**
@@ -41,6 +41,8 @@ export class RunningLock {
   static supportNote: string = '';
 
   private static lock: runningLock.RunningLock | null = null;
+  /** 在途的 acquire（单飞：并发调用共用同一次，防止重复拿锁） */
+  private static pending: Promise<void> | null = null;
 
   /** 候选类型顺序：先新的、再旧的、最后兜底（都带名字，便于诊断） */
   private static readonly CANDIDATES: Array<[string, number]> = [
@@ -51,9 +53,22 @@ export class RunningLock {
 
   /**
    * 获取运行锁（幂等，可重复调用）。
-   * 逐个探测+尝试；每一步失败都记录原因但不抛出。
+   * ★ 单飞（2026-10-31 审计 B8）：acquire 是异步的，原来并发的两次调用
+   *   都能通过 `lock === null` 检查、各自 create —— 重复持有、释放时只放掉一个。
+   *   现在在途的调用共用同一个 Promise。
    */
-  static async acquire(): Promise<void> {
+  static acquire(): Promise<void> {
+    if (RunningLock.pending !== null) {
+      return RunningLock.pending;
+    }
+    const p: Promise<void> = RunningLock.acquireInner().finally(() => {
+      RunningLock.pending = null;
+    });
+    RunningLock.pending = p;
+    return p;
+  }
+
+  private static async acquireInner(): Promise<void> {
     if (RunningLock.lock !== null) {
       return;
     }
@@ -84,8 +99,9 @@ export class RunningLock {
         Logger.i(`[lock] 运行锁已持有（${name}，永久）—— 熄屏时保持推帧`);
         return;
       } catch (e) {
-        const err = e as BusinessError;
-        const why = err === undefined ? String(e) : `${err.code} ${err.message}`;
+        // ★ 不 as BusinessError 硬取 code/message：非 BusinessError 的抛出
+        //   会直接炸出 undefined，统一走 Logger.safe（2026-10-31 审计 B8）
+        const why = Logger.safe(e);
         notes.push(`${name}失败:${why}`);
         Logger.w(`[lock] ${name} 获取失败: ${why}`);
       }
@@ -96,7 +112,7 @@ export class RunningLock {
     Logger.w(`[lock] 运行锁获取失败: ${RunningLock.supportNote}`);
   }
 
-  /** 释放（正常退出时用） */
+  /** 释放（★ 预留：当前应用没有退出路径调用它，保留给将来"停止喂屏"开关用） */
   static release(): void {
     if (RunningLock.lock === null) {
       return;

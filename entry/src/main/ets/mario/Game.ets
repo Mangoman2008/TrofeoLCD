@@ -5,7 +5,7 @@ import { TILE, GRAVITY, MAX_FALL, JUMP_VEL, JUMP_CUT, WALK_SPEED, RUN_SPEED, ACC
 import type { CloudPos, HillPos } from './Types';
 import { InputManager } from './Input';
 import { SoundManager } from './Audio';
-import { LevelData, buildLevel, buildBonusRoom } from './Levels';
+import { LevelData, buildLevel, buildBonusRoom, isSolidTile } from './Levels';
 import type { PipeWarp } from './Levels';
 import { Player, Goomba, Fish, CoinPickup, Mushroom, Particle, Popup } from './Entities';
 import { hilog } from '@kit.PerformanceAnalysisKit';
@@ -54,11 +54,6 @@ function charColorsOf(ch: number): CharColors {
 /**
  * 超级玛丽游戏引擎：状态机、物理、碰撞、敌人 AI、计分与渲染。
  */
-/** hazardAhead() 的返回值 */
-export const HAZARD_PIT: number = 1;
-export const HAZARD_WALL: number = 2;
-export const HAZARD_ENEMY: number = 3;
-
 export class SuperMarioGame {
   /**
    * 演示模式：**无限命**（本移植版新增）。
@@ -107,6 +102,8 @@ export class SuperMarioGame {
   savedMushrooms: Mushroom[] = [];
   savedParticles: Particle[] = [];
   savedPopups: Popup[] = [];
+  /** 进奖励关前的主关检查点（enterSub 存、exitSub 取） */
+  private savedCheckpointIdx: number = 0;
 
   constructor(input: InputManager, sound: SoundManager, w: number, h: number) {
     this.input = input;
@@ -122,51 +119,6 @@ export class SuperMarioGame {
   // ============ 对外接口 ============
 
   /**
-   * 演示版自动驾驶用：**前方是否危险**（该跳了）。
-   * 本移植版新增 —— 副屏没有输入设备，只能靠游戏自己判断什么时候跳。
-   *
-   * 判据三条（任一成立就跳）：
-   *   ① 前方 14px 处脚下没有实心方块 → 是坑
-   *   ② 前方 14px 处身体高度是实心 → 是墙/水管
-   *   ③ 前方 56px 内有板栗仔，且高度相近
-   */
-  hazardAhead(): number {
-    if (this.player === undefined || this.player === null) {
-      return 0;
-    }
-    const p = this.player;
-    // 坑/墙提前 44px（≈3 格）；敌人提前 26px —— 更近才起跳，落点正好在它头上（踩）
-    const colPit: number = Math.floor((p.x + p.w + 44) / TILE);
-    const colWall: number = Math.floor((p.x + p.w + 20) / TILE);
-    const rowFoot: number = Math.floor((p.y + p.h + 2) / TILE);
-    // ① 脚下没有地 → 坑
-    let ground: boolean = false;
-    for (let r = rowFoot; r <= rowFoot + 1; r++) {
-      if (SuperMarioGame.solidAt(this.level.tileAt(colPit, r))) {
-        ground = true;
-        break;
-      }
-    }
-    if (!ground) {
-      return HAZARD_PIT;
-    }
-    // ② 身体高度处是实心 → 墙/水管
-    const rowMid: number = Math.floor((p.y + p.h * 0.5) / TILE);
-    if (SuperMarioGame.solidAt(this.level.tileAt(colWall, rowMid))) {
-      return HAZARD_WALL;
-    }
-    // ③ 前方有敌人 → **踩它**
-    for (let i = 0; i < this.goombas.length; i++) {
-      const g = this.goombas[i];
-      const dx: number = g.x - p.x;
-      if (dx > 0 && dx < 26 && Math.abs(g.y - p.y) < 48) {
-        return HAZARD_ENEMY;
-      }
-    }
-    return 0;
-  }
-
-  /**
    * 演示自动驾驶传感器（移植版新增）：一次给全，省得调用方反复问。
    * @returns [onGround(0/1), 前方地面剩余px, 前方坑宽(格), 最近正前方敌人距离px, 敌人与我在同一高度(0/1)]
    */
@@ -180,7 +132,7 @@ export class SuperMarioGame {
       const c: number = startCol + groundCols;
       let solid: boolean = false;
       for (let r = rowFoot; r <= rowFoot + 1; r++) {
-        if (SuperMarioGame.solidAt(this.level.tileAt(c, r))) {
+        if (isSolidTile(this.level.tileAt(c, r))) {
           solid = true;
           break;
         }
@@ -198,7 +150,7 @@ export class SuperMarioGame {
       while (gapCols < 8) {
         let solid2: boolean = false;
         for (let r = rowFoot; r <= rowFoot + 2; r++) {
-          if (SuperMarioGame.solidAt(this.level.tileAt(c2 + gapCols, r))) {
+          if (isSolidTile(this.level.tileAt(c2 + gapCols, r))) {
             solid2 = true;
             break;
           }
@@ -227,7 +179,7 @@ export class SuperMarioGame {
     for (let c = startCol; c <= startCol + 3; c++) {
       let solid3: boolean = false;
       for (let r = rowMid2; r <= rowLow; r++) {
-        if (SuperMarioGame.solidAt(this.level.tileAt(c, r))) {
+        if (isSolidTile(this.level.tileAt(c, r))) {
           solid3 = true;
           break;
         }
@@ -264,17 +216,6 @@ export class SuperMarioGame {
     return this.level.theme === ThemeId.UNDERWATER;
   }
 
-  /** 诊断用：把传感器值拼成字符串 */
-  senseInfo(): string {
-    const s: number[] = this.demoSense();
-    return `onG=${s[0]} pit=${s[1]} gap=${s[2]} enemy=${s[3]} same=${s[4]} wall=${s.length > 5 ? s[5] : -1}`;
-  }
-
-  /** 兼容旧调用：前方有没有危险 */
-  dangerAhead(): boolean {
-    return this.hazardAhead() !== 0;
-  }
-
   /** 玩家当前矩形是否与实心 tile 重叠（演示助推用） */
   static playerHitsSolid(level: LevelData, p: Player): boolean {
     const c0: number = Math.floor(p.x / TILE);
@@ -289,15 +230,6 @@ export class SuperMarioGame {
       }
     }
     return false;
-  }
-
-  /** 该 tile 是不是实心（坑/墙判定用） */
-  private static solidAt(t: number): boolean {
-    return t === TileId.GROUND || t === TileId.STONE || t === TileId.BRICK
-      || t === TileId.QUESTION || t === TileId.USED
-      || t === TileId.PIPE_TL || t === TileId.PIPE_TR
-      || t === TileId.PIPE_L || t === TileId.PIPE_R
-      || t === TileId.QUESTION_POWER;
   }
 
   /** 诊断用：玩家世界坐标（本移植版新增，只读） */
@@ -405,6 +337,12 @@ export class SuperMarioGame {
     this.rescuesSinceProgress = 0;
     this.assistsSinceProgress = 0;
     this.lastSafeX = 0;
+    // ★ 助推计时同样要换代重置（2026-10-31 审计 B5）：
+    //   assistBestX 留着上一关的坐标 → 新关刚开局 x 就"没超过最远位置"，
+    //   assistT 还是上一关的时间 → globalT - assistT 立刻超阈值，
+    //   结果新关卡刚进来就误触发一次助推。
+    this.assistBestX = 0;
+    this.assistT = this.globalT;
     this.pickups = [];
     this.mushrooms = [];
     this.particles = [];
@@ -569,7 +507,6 @@ export class SuperMarioGame {
     const speedMul = stats[0];
     const jumpMul = stats[1];
 
-    this.player.animT += dt;
     this.player.coyote = this.player.onGround ? COYOTE_TIME : Math.max(0, this.player.coyote - dt);
     // 跳跃缓冲：仅在“新按下”时刷新
     if (this.input.isPressed(GameAction.JUMP)) {
@@ -665,14 +602,15 @@ export class SuperMarioGame {
 
     // ★ 演示模式：**卡住助推跳**。
     //   实测有几种台阶（上方还有砖块压着）用普通跳永远翻不过去，
-    //   自动驾驶就会贴在那里反复跳。这里在"x 超过 1.2 秒没前进"时
+    //   自动驾驶就会贴在那里反复跳。这里在"x 超过 3.0 秒没前进"时
     //   给一次**比普通跳更高**的上升速度，当作二段跳把它顶上去。
+    //   （2026-10-31 审计 B5：注释原来写 1.2s/2.5s，与代码里的 3.0 不符）
     if (this.demoInfiniteLives && !this.player.dead) {
       if (this.player.x > this.assistBestX + 4) {
         this.assistBestX = this.player.x;
         this.assistT = this.globalT;
       } else if (this.globalT - this.assistT > 3.0) {
-        // ★ 最后一道保险：卡住 2.5 秒还没前进，就**小幅前推 + 轻抬**。
+        // ★ 最后一道保险：卡住 3.0 秒还没前进，就**小幅前推 + 轻抬**。
         //   为什么需要它：有些位置（台阶贴着水管、或头顶有砖块压着）用普通跳
         //   在物理上就过不去，自动驾驶会永远贴着跳。前推 24px、抬高 6px 在 3× 放大下
         //   几乎看不出来，但足以让它脱困继续跑。
@@ -727,7 +665,6 @@ export class SuperMarioGame {
         this.player.vy = 0;
         this.player.invincible = 1.0;
         this.demoRescues++;
-        this.demoRescueCount++;
         this.rescuesSinceProgress++;
         // 同一个坑救回 3 次还没前进 → 判为"这个坑过不去"，直接换关
         if (this.rescuesSinceProgress >= 3) {
@@ -805,9 +742,6 @@ export class SuperMarioGame {
   private lastSafeY: number = 0;
   /** 演示模式：自动救回次数 */
   demoRescues: number = 0;
-  /** 连续救回计数（短时间内的），用来识别"这个坑过不去" */
-  private rescueStreak: number = 0;
-  private lastRescueT: number = -99;
   /**
    * 演示模式：**进度条机制**（统一管住所有"作弊"）。
    * 只要玩家比历史最远位置多前进 48px，就认为"有进展"，
@@ -823,8 +757,6 @@ export class SuperMarioGame {
   private assistT: number = 0;
   /** 助推跳次数（诊断） */
   demoAssists: number = 0;
-  /** 救回次数（诊断） */
-  demoRescueCount: number = 0;
   lastDeathX: number = 0;
   lastDeathCause: string = '';
 
@@ -913,6 +845,10 @@ export class SuperMarioGame {
     this.savedMushrooms = this.mushrooms;
     this.savedParticles = this.particles;
     this.savedPopups = this.popups;
+    // ★ 主关检查点先存起来（2026-10-31 审计 B5）：奖励关自己从 0 数，
+    //   但主关进度不能丢 —— 否则从奖励关回来后 checkpointIdx=0，
+    //   再死一次就整个重生回关卡起点，检查点白捡。
+    this.savedCheckpointIdx = this.checkpointIdx;
     this.subLevel = buildBonusRoom();
     this.level = this.subLevel;
     this.subActive = true;
@@ -947,10 +883,16 @@ export class SuperMarioGame {
     this.mushrooms = this.savedMushrooms;
     this.particles = this.savedParticles;
     this.popups = this.savedPopups;
+    // ★ 恢复主关检查点（与 enterSub 的保存配对，见那边的说明）
+    this.checkpointIdx = this.savedCheckpointIdx;
     this.sound.play('pipe');
     this.vibrate(25);
     this.player.reset(this.returnCol * TILE, this.level.spawnY);
     this.player.invincible = 1.0;
+    // ★ 回主关后"最后站稳处"同步为返回点：lastSafeX/Y 还留着奖励关里的
+    //   坐标（小房间），若返回后马上掉坑，会被"救回"到主关里的错误位置。
+    this.lastSafeX = this.player.x;
+    this.lastSafeY = this.player.y;
     this.levelTime = 300;
     this.cameraX = Math.max(0, this.player.x - this.screenW * 0.38);
   }
@@ -1297,6 +1239,9 @@ export class SuperMarioGame {
       }
       f.y = f.baseY + Math.sin(f.t * 2.2) * 22;
       if (f.x < this.cameraX - 80 || f.x > this.cameraX + this.screenW + 80) {
+        // ★ 游出视野的鱼直接回收（2026-10-31 审计 B5）：原来只 continue，
+        //   水下关里鱼会漂出关卡边界（越界列不判实心、拦不住），数组只增不减。
+        this.fish.splice(i, 1);
         continue;
       }
       if (this.overlapEntity(this.player, f.x, f.y, f.w, f.h)) {

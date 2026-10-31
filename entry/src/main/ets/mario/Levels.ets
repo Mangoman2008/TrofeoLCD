@@ -218,7 +218,9 @@ function buildOverworld(world: number): LevelData {
   putEnemy(lv, 18);
   putEnemy(lv, 33);
   putEnemy(lv, 48);
-  putEnemy(lv, 62);
+  // ★ 原来放 62 —— 世界 4（diff=3）时上面的坑加宽到 56..62，
+  //   敌人直接生在坑上空（落地即坠）。挪到 64，永远在坑之后（2026-10-31 审计 B5）。
+  putEnemy(lv, 64);
   putEnemy(lv, 66);
   putEnemy(lv, 96);
   putEnemy(lv, 102);
@@ -308,7 +310,6 @@ function buildUnderwater(world: number): LevelData {
   lv.spawnY = groundY() - 32;
   lv.flagCol = 102;
   lv.flagTopRow = 3;
-  const diff = world - 1;
 
   // 水底石块
   for (let c = 6; c <= 9; c++) {

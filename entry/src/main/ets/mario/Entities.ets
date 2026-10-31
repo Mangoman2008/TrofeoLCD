@@ -19,7 +19,6 @@ export class Player {
   jumps: number = 0;       // 本段滞空已用跳跃次数（落地清零）
   big: boolean = false;    // 大玛丽状态（吃蘑菇变大）
   character: number = 0;   // 角色（马里奥/公主/酷霸王）
-  animT: number = 0;       // 动画计时
 
   reset(x: number, y: number): void {
     this.x = x;
@@ -36,7 +35,6 @@ export class Player {
     this.invincible = 0;
     this.jumps = 0;
     this.big = false;
-    this.animT = 0;
   }
 }
 

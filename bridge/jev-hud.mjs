@@ -52,8 +52,13 @@ const PORT = Number(argValue('--port', process.env.DSH_JEV_PORT || 54551))
 const BASE_URL = (argValue('--base-url', process.env.TYPESAFE_BASE_URL || 'https://api.typesafe.ai')).replace(/\/$/, '')
 const MODEL = argValue('--model', process.env.JEV_MODEL || 'jev-latest')
 const FORCE_MOCK = argv.includes('--force-mock')
-const RPS = Number(argValue('--rps', '18'))
-const CONCURRENCY = Number(argValue('--concurrency', '4'))
+// ★ 限流参数启动钳制（2026-10-31 审计 B4）：--rps abc 之类会得到 NaN，
+//   NaN 间隔让 Limiter 的 sleep 判断全部失效 → 限流被静默关掉。
+//   非有限正数一律回落默认值。
+const RPS_RAW = Number(argValue('--rps', '18'))
+const RPS = Number.isFinite(RPS_RAW) && RPS_RAW > 0 ? RPS_RAW : 18
+const CONC_RAW = Number(argValue('--concurrency', '4'))
+const CONCURRENCY = Number.isFinite(CONC_RAW) && CONC_RAW >= 1 ? Math.floor(CONC_RAW) : 4
 /** 输入 token 单价（美元/百万），jev-xray 里写的就是这个：输出 token 不计费 */
 const PRICE_PER_MTOK = 0.042
 
@@ -345,8 +350,15 @@ function record(res, simulated) {
 function statsPayload() {
   const sorted = [...stats.latencies].sort((a, b) => a - b)
   const p50 = sorted.length ? sorted[Math.floor(sorted.length / 2)] : 0
+  // ★ 2026-10-31 审计 B4：不再 `...stats` 整包展开 —— latencies 数组（最多 200 项）
+  //   会跟着每个 /api/stats、每条 SSE progress/done 事件外发，白白放大流量；
+  //   前端只消费 p50，这里逐字段挑出来。
   return {
-    ...stats,
+    requests: stats.requests,
+    decisions: stats.decisions,
+    inputTokens: stats.inputTokens,
+    outputTokens: stats.outputTokens,
+    errors: stats.errors,
     p50: Math.round(p50),
     costUsd: (stats.inputTokens / 1e6) * PRICE_PER_MTOK,
     pricePerMTok: PRICE_PER_MTOK,
@@ -421,8 +433,48 @@ function createJob({ files, question, maxTokens, model }) {
     maxTokens,
   }
   jobs.set(id, job)
-  void runJob(job)
+  // ★ 2026-10-31 审计 B4：原来 `void runJob(job)` —— runJob 一旦 reject
+  //   （比如 fileList 里混进坏元素）就是未处理的 rejection，任务永远不
+  //   emit done，SSE 客户端挂着等到天荒地老。这里兜底收尾。
+  runJob(job).catch((e) => {
+    log('runJob 意外失败: ' + (e && e.message ? e.message : String(e)))
+    try {
+      finishJob(job, e)
+    } catch {
+      /* 收尾失败只能放弃 */
+    }
+  })
   return job
+}
+
+/**
+ * 任务收尾（完成或夭折都走这里）：
+ *  · emit error（若有意外失败）+ done（保证客户端总能等到终结事件）
+ *  · 关掉所有 SSE 客户端连接
+ *  · 5 分钟后从 jobs Map 回收 —— 原来 job 永不 delete，扫一次挂一个，
+ *    长跑进程内存与 Map 只涨不跌（2026-10-31 审计 B4）
+ */
+function finishJob(job, extraError) {
+  if (job.finishedAt === null) {
+    job.finishedAt = Date.now()
+    if (extraError) {
+      job.errors++
+      emit(job, 'error', { rel: '', error: '任务中断: ' + (extraError && extraError.message ? extraError.message : String(extraError)) })
+    }
+    emit(job, 'done', { done: job.done, total: job.total, errors: job.errors, ms: job.finishedAt - job.startedAt, stats: statsPayload() })
+  }
+  for (const res of job.clients) {
+    try {
+      res.end()
+    } catch {
+      /* ignore */
+    }
+  }
+  job.clients.clear()
+  const id = job.id
+  setTimeout(() => {
+    jobs.delete(id)
+  }, 300_000)
 }
 
 function emit(job, event, payload) {
@@ -438,37 +490,39 @@ function emit(job, event, payload) {
 
 async function runJob(job) {
   const cap = Math.max(500, (job.maxTokens || 3000) * 4)
-  for (const f of job.fileList) {
-    let content = ''
-    try {
-      content = fs.readFileSync(f.file, 'utf8').slice(0, cap)
-    } catch {
-      job.errors++
-      continue
+  try {
+    for (const f of job.fileList) {
+      let content = ''
+      try {
+        content = fs.readFileSync(f.file, 'utf8').slice(0, cap)
+      } catch {
+        job.errors++
+        continue
+      }
+      const state = { path: f.rel, content }
+      const res = await ask({ state, questions: { [job.question.key]: job.question.spec }, model: job.model })
+      job.done++
+      if (!res.ok) {
+        job.errors++
+        emit(job, 'error', { rel: f.rel, error: res.error })
+        continue
+      }
+      const answer = res.data.answers?.[job.question.key] || null
+      const row = {
+        rel: f.rel,
+        size: f.size,
+        answer,
+        latencyMs: res.latencyMs,
+        simulated: !!res.simulated,
+        inputTokens: res.data.usage?.input_tokens || 0,
+      }
+      job.results.push(row)
+      emit(job, 'answer', row)
+      emit(job, 'progress', { done: job.done, total: job.total, errors: job.errors, stats: statsPayload() })
     }
-    const state = { path: f.rel, content }
-    const res = await ask({ state, questions: { [job.question.key]: job.question.spec }, model: job.model })
-    job.done++
-    if (!res.ok) {
-      job.errors++
-      emit(job, 'error', { rel: f.rel, error: res.error })
-      continue
-    }
-    const answer = res.data.answers?.[job.question.key] || null
-    const row = {
-      rel: f.rel,
-      size: f.size,
-      answer,
-      latencyMs: res.latencyMs,
-      simulated: !!res.simulated,
-      inputTokens: res.data.usage?.input_tokens || 0,
-    }
-    job.results.push(row)
-    emit(job, 'answer', row)
-    emit(job, 'progress', { done: job.done, total: job.total, errors: job.errors, stats: statsPayload() })
+  } finally {
+    finishJob(job)
   }
-  job.finishedAt = Date.now()
-  emit(job, 'done', { done: job.done, total: job.total, errors: job.errors, ms: job.finishedAt - job.startedAt, stats: statsPayload() })
 }
 
 // ───────────────────────── 内置透镜包（与 jev-xray 的 default.json 同构）─────────────────────────
@@ -534,6 +588,9 @@ const LENSES = [
 ]
 
 // ───────────────────────── HTTP ─────────────────────────
+
+/** 凭据文件黑名单：/api/file 与 /api/scan 共用（别让页面变成"一键读 key"） */
+const DENY = /(^|\/)(\.credentials\.yaml|\.env|\.netrc|id_rsa|id_ed25519|.*\.pem|.*\.key|.*\.p12|.*\.pfx)$/i
 
 function sendJSON(res, obj, code = 200) {
   const body = Buffer.from(JSON.stringify(obj), 'utf8')
@@ -641,7 +698,6 @@ const server = http.createServer(async (req, res) => {
     //（否则这个页面就成了"一键把 key 贴到屏幕上"的工具）。
     const want = path.resolve(url.searchParams.get('path') || '')
     const home = os.homedir()
-    const deny = /(^|\/)(\.credentials\.yaml|\.env|\.netrc|id_rsa|id_ed25519|.*\.pem|.*\.key|.*\.p12|.*\.pfx)$/i
     if (!want || !fs.existsSync(want)) {
       sendJSON(res, { ok: false, error: '文件不存在: ' + want }, 400)
       return
@@ -650,7 +706,7 @@ const server = http.createServer(async (req, res) => {
       sendJSON(res, { ok: false, error: '只允许读 home 目录下的文件' }, 403)
       return
     }
-    if (deny.test(want)) {
+    if (DENY.test(want)) {
       sendJSON(res, { ok: false, error: '这个文件看起来含凭据，拒绝读取' }, 403)
       return
     }
@@ -679,7 +735,9 @@ const server = http.createServer(async (req, res) => {
 
   if (p === '/api/files') {
     const dir = path.resolve(url.searchParams.get('dir') || ROOT)
-    const max = Math.min(500, Number(url.searchParams.get('max') || 120))
+    // 同款钳制：?max=abc 会得到 NaN，把文件数上限静默关掉
+    const maxRaw = Number(url.searchParams.get('max'))
+    const max = Number.isFinite(maxRaw) ? Math.min(500, Math.max(1, maxRaw)) : 120
     if (!fs.existsSync(dir)) {
       sendJSON(res, { ok: false, error: '目录不存在: ' + dir }, 400)
       return
@@ -701,21 +759,56 @@ const server = http.createServer(async (req, res) => {
       sendJSON(res, { ok: false, error: '请求体不是合法 JSON' }, 400)
       return
     }
-    const dir = path.resolve(body.dir || ROOT)
-    const maxFiles = Math.min(400, Number(body.maxFiles || 60))
-    const fileList = Array.isArray(body.files) && body.files.length
-      ? body.files.map((f) => ({ file: path.resolve(f.file || f), rel: f.rel || path.basename(f.file || f), size: f.size || 0 }))
-      : listFiles(dir, maxFiles)
-    if (!fileList.length) {
-      sendJSON(res, { ok: false, error: '目录里没有可判定的文件' }, 400)
+    // ★ 2026-10-31 审计 B4：整个 handler 包 try/catch。
+    //   原来 body 为 JSON null / files 元素不是对象时会直接 TypeError 把
+    //   server 的 async handler 炸成 unhandled rejection（请求悬挂）。
+    try {
+      if (!body || typeof body !== 'object' || Array.isArray(body)) {
+        sendJSON(res, { ok: false, error: '请求体应为 JSON 对象' }, 400)
+        return
+      }
+      const dir = path.resolve(typeof body.dir === 'string' && body.dir ? body.dir : ROOT)
+      // 限流参数同款钳制：maxFiles 非法值回落默认，别让 NaN 关掉上限
+      const maxFilesRaw = Number(body.maxFiles)
+      const maxFiles = Number.isFinite(maxFilesRaw) ? Math.min(400, Math.max(1, maxFilesRaw)) : 60
+      let fileList
+      if (Array.isArray(body.files) && body.files.length) {
+        fileList = []
+        for (const f of body.files) {
+          // 元素只接受"含字符串 file 字段的对象"或纯字符串，其余跳过
+          const fp = typeof f === 'string' ? f
+            : (f && typeof f === 'object' && typeof f.file === 'string' ? f.file : '')
+          if (!fp || DENY.test(fp)) {
+            continue
+          }
+          const abs = path.resolve(fp)
+          const relOk = f && typeof f === 'object' && typeof f.rel === 'string' && f.rel
+          const sizeOk = f && typeof f === 'object' && Number.isFinite(Number(f.size)) ? Number(f.size) : 0
+          fileList.push({ file: abs, rel: relOk || path.basename(abs), size: sizeOk })
+        }
+      } else {
+        // 扫目录分支同样过凭据过滤（原来只 /api/file 有）
+        if (DENY.test(dir)) {
+          sendJSON(res, { ok: false, error: '这个目录看起来含凭据，拒绝扫描' }, 403)
+          return
+        }
+        fileList = listFiles(dir, maxFiles)
+      }
+      if (!fileList.length) {
+        sendJSON(res, { ok: false, error: '目录里没有可判定的文件' }, 400)
+        return
+      }
+      const question = body.question && body.question.key && body.question.spec
+        ? body.question
+        : { key: 'start_here', spec: LENSES.find((l) => l.key === 'start_here') }
+      const maxTokensRaw = Number(body.maxTokens)
+      const job = createJob({ files: fileList, question, maxTokens: Number.isFinite(maxTokensRaw) ? maxTokensRaw : 3000, model: body.model })
+      sendJSON(res, { ok: true, id: job.id, total: job.total, question: question.key, simulated: !HAS_KEY })
+      return
+    } catch (e) {
+      sendJSON(res, { ok: false, error: 'scan 参数不对: ' + (e && e.message ? e.message : String(e)) }, 400)
       return
     }
-    const question = body.question && body.question.key && body.question.spec
-      ? body.question
-      : { key: 'start_here', spec: LENSES.find((l) => l.key === 'start_here') }
-    const job = createJob({ files: fileList, question, maxTokens: Number(body.maxTokens || 3000), model: body.model })
-    sendJSON(res, { ok: true, id: job.id, total: job.total, question: question.key, simulated: !HAS_KEY })
-    return
   }
 
   if (p.startsWith('/api/scan/') && p.endsWith('/stream')) {
