@@ -78,8 +78,11 @@ async function main(): Promise<void> {
   const s3 = new LcdUsb();
   const info = await s3.open();
   check('S3 握手成功: 设备信息',
+    // 高度期望 462 不是 480：462 vs 480 的分歧已实测拍板"维持 462"
+    // （Bug修复清单-20261014.md §175：480 反而更糊）—— 解析器按 462 返回是对的，
+    // 这里旧期望 480 是陈旧值，2026-10-31 修正。
     info !== null && info.pm === 65 && info.sub === 5 && info.fbl === 192
-    && info.width === 1920 && info.height === 480 && info.rotateDeg === 180,
+    && info.width === 1920 && info.height === 462 && info.rotateDeg === 180,
     info === null ? 'null' : info.toString());
   const hs = sim.writes[0];
   check('S3 握手包',

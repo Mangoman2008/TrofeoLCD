@@ -24,7 +24,6 @@
  * 四大特效本身都是低频柔和图案，块状化后观感几乎无差别。
  * 而且块状画面**没有高频细节**，JPEG 编码也更便宜（本工程实测：高频纹理是码率杀手）。
  */
-import { HostStats } from '../service/HostStats';
 
 /** 特效风格（对应它的 `Style`） */
 export enum BgStyle {

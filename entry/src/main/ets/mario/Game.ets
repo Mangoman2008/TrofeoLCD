@@ -1,10 +1,12 @@
 import { TILE, GRAVITY, MAX_FALL, JUMP_VEL, JUMP_CUT, WALK_SPEED, RUN_SPEED, ACCEL, AIR_ACCEL, FRICTION,
   COYOTE_TIME, JUMP_BUFFER_TIME, MAX_JUMPS, LEVEL_ROWS, MAX_LIVES, TOTAL_LEVELS,
-  TileId, GameScreen, GameAction, ThemeId, CloudPos, HillPos,
+  TileId, GameScreen, GameAction, ThemeId,
   CharacterId, CHARACTER_NAMES, CHARACTER_STATS } from './Types';
+import type { CloudPos, HillPos } from './Types';
 import { InputManager } from './Input';
 import { SoundManager } from './Audio';
-import { LevelData, buildLevel, buildBonusRoom, PipeWarp } from './Levels';
+import { LevelData, buildLevel, buildBonusRoom } from './Levels';
+import type { PipeWarp } from './Levels';
 import { Player, Goomba, Fish, CoinPickup, Mushroom, Particle, Popup } from './Entities';
 import { hilog } from '@kit.PerformanceAnalysisKit';
 
