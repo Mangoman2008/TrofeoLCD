@@ -11,3 +11,5 @@
 /.build-output
 /bridge/.bridge.pid
 /bridge/.bridge.log
+/.verify
+/.hwtest
