@@ -27,6 +27,20 @@
                             └────────────────┘
 ```
 
+## 截图（真机捕获，共 19 个主题可切换）
+
+帧取自 MatePad Edge 真机实际输出（1920×462，即推给 LCD 的那一帧）。
+
+| 主题 | 截图 |
+|---|---|
+| 0 · 仪表盘（看板娘） | ![仪表盘+看板娘](screenshots/theme-00-dashboard-maid.jpg) |
+| 2 · 监控墙 | ![监控墙](screenshots/theme-02-monitor-wall.jpg) |
+| 4 · 打砖块 | ![打砖块](screenshots/theme-04-pong.jpg) |
+| 10 · 赛博二次元 | ![赛博二次元](screenshots/theme-10-cyber-anime.jpg) |
+| 16 · 自走贪吃蛇 | ![自走贪吃蛇](screenshots/theme-16-snake.jpg) |
+| 17 · 超级玛丽 | ![超级玛丽](screenshots/theme-17-mario.jpg) |
+| 18 · 天气 | ![天气](screenshots/theme-18-weather.jpg) |
+
 ---
 
 ## 一、设备与协议（已核实）
