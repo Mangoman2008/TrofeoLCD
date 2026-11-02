@@ -1,18 +1,6 @@
 {
   "configurations": [
     {
-      "userData": {
-        "data": {
-          "module": ""
-        }
-      },
-      "id": "i5eqJipF",
-      "type": "Application",
-      "typeId": "Application",
-      "beforeLaunch": [],
-      "name": "Default"
-    },
-    {
       "name": "entry",
       "id": "6uVO2UC1",
       "type": "Application",

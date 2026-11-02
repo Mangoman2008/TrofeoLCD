@@ -34,9 +34,11 @@ import { ThemeAnimeFree } from '../render/ThemeAnimeFree';
 import { ThemeAnimeHUD } from '../render/ThemeAnimeHUD';
 import { ThemeNanoMuse } from '../render/ThemeNanoMuse';
 import { ThemeTrofeoRust } from '../render/ThemeTrofeoRust';
+import { ThemeMaid } from '../render/ThemeMaid';
 import { Backdrop, BgStyle, bgStyleFromName } from '../render/Backdrop';
 import { ThemeDotiiCell, DotiiCellInfo } from '../render/ThemeDotiiCell';
 import { History } from '../common/History';
+import { L } from '../common/Theme';
 import { ToastPolicy, FocusTimer, Toast } from '../common/Toasts';
 import { RenderExtras } from '../common/Extras';
 import { TelemetryBridge } from '../bridge/TelemetryBridge';
@@ -328,6 +330,9 @@ export class LcdService {
   private pongSavedForceInterval: number = -1;
   /** 打砖块的目标帧间隔（≈15fps）：物理 20ms/步，66ms 一帧约 3 步，速度正确 */
   private static readonly PONG_FPS_MS: number = 66;
+  /** 看板娘的动画 tick 间隔：温和的待机动作用不着打砖块的 66ms，220ms 就够顺
+   *  （实际重推节奏由签名的 250ms 量化步长决定，这里只保证 tick 够密） */
+  private static readonly MAID_FPS_MS: number = 220;
 
   /** 播放期间被顶掉的 forceIntervalMs 原值（-1 = 没顶过） */
   private seqSavedForceInterval: number = -1;
@@ -2012,6 +2017,17 @@ export class LcdService {
    * 刻意排除秒（时钟只画到分钟）、包含 VM 帧计数（画面换了要重推）、
    * 把耗时/帧率这类只影响底部小字的值按"取整后"纳入，避免抖动导致每帧都重推。
    */
+  /**
+   * 看板娘是否在画（2026-11-02 用户改需求：半身小版画在「用量」面板右上空区，
+   * 不占打印机格）。门控与 usagePanel 的绘制条件严格一致：
+   * 主题 0 + 横装 + 用量面板在画（L.usPanelVisible）。
+   * 签名（maid=）与提帧（syncPongInterval）都靠这一个门控，
+   * 不会出现"画了不动"或"不画却在提帧"的错位。
+   */
+  private maidShown(): boolean {
+    return this.theme === 0 && !this.verticalMode && L.usPanelVisible;
+  }
+
   private contentSignature(t: Telemetry, bridgeFresh: boolean): string {
     const ag = t.agent;
     const todo = t.todos === undefined ? 0 : t.todos.length;
@@ -2059,6 +2075,10 @@ export class LcdService {
       `snakeFull=${this.theme === 16 && this.snakeFull !== null ? this.snakeFull.tick : '-'}`,
       // VM 没画面时播的马里奥演示：帧计数器进签名，否则"内容未变"会把游戏冻住
       `mario=${(this.vmPm === null && Dashboard.marioEnabled) ? Dashboard.mario.frame : -1}`,
+      // ★ 看板娘（2026-11-02，主题 0 打印机格空置时的 Q 版女仆）：动画相位按 250ms
+      //   量化进签名 —— 与 wxq=/anim= 同型。不进签名就会被"内容未变则跳过"冻住，
+      //   呼吸/眨眼/热气全部只剩 3 秒心跳帧（≈0.33fps）。
+      `maid=${this.maidShown() ? ThemeMaid.animTick(Date.now()) : -1}`,
       `marioFull=${this.theme === 17 ? Dashboard.mario.frame : -1}`,
       // 天气主题：数据版本变了要重画；同时按 250ms 量化动画相位（地球自转/粒子/高亮点）
       `wx=${this.theme === 18 ? this.wx.data.atMs : -1},wxq=${this.theme === 18 ? Math.floor(Date.now() / 250) : -1}`,
@@ -3982,6 +4002,10 @@ export class LcdService {
     // 主题 16 也是逐帧动画（蛇每 170ms 走一格），同样要提帧率
     // 马里奥演示（VM 无画面时）也是逐帧动画，要提帧率
     const marioOn: boolean = this.vmPm === null && Dashboard.marioEnabled;
+    // ★ 看板娘（2026-11-02）：呼吸/眨眼/热气是时间驱动动画，签名按 250ms 量化
+    //   （ThemeMaid.animTick），tick 间隔也要跟上 —— 否则 500ms 空闲档下每步
+    //   要等 2 个 tick，动画等效 ~1fps，看着是抽搐。
+    const maidOn: boolean = this.maidShown();
     const pongVisible: boolean = this.theme === 4 || this.theme === 16 || this.theme === 17
       || inCellAnim || dotiiSnake || marioOn;
     if (pongVisible) {
@@ -3991,6 +4015,14 @@ export class LcdService {
       // 只有在没被别人（序列播放 / /set?fps）压低时才接管
       if (this.forceIntervalMs === 0 || this.forceIntervalMs > LcdService.PONG_FPS_MS) {
         this.forceIntervalMs = LcdService.PONG_FPS_MS;
+      }
+    } else if (maidOn) {
+      // 同一套 save/restore，只是目标间隔温和一些（220ms）
+      if (this.pongSavedForceInterval < 0) {
+        this.pongSavedForceInterval = this.forceIntervalMs;
+      }
+      if (this.forceIntervalMs === 0 || this.forceIntervalMs > LcdService.MAID_FPS_MS) {
+        this.forceIntervalMs = LcdService.MAID_FPS_MS;
       }
     } else if (this.pongSavedForceInterval >= 0) {
       this.forceIntervalMs = this.pongSavedForceInterval;

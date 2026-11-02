@@ -12,6 +12,7 @@ import { DotiiState, ThemeDotii, DOTII_EXPR_NAMES } from './ThemeDotii';
 import { ThemeDotiiCell } from './ThemeDotiiCell';
 import { ThemePong, PongState, pongInit, pongAdvance } from './ThemePong';
 import { ThemeSnake, SnakeState } from './ThemeSnake';
+import { ThemeMaid } from './ThemeMaid';
 import { MarioDemo } from '../mario/MarioDemo';
 import { USAGE_X as DOTII_USAGE_X, USAGE_W as DOTII_USAGE_W, DSH_W as DOTII_DSH_W,
   CELL_W as DOTII_CELL_W, CELL_X as DOTII_CELL_X,
@@ -280,6 +281,8 @@ export class Dashboard {
 
     // 面板 3：拓竹打印机面板（加宽档 448×434 —— 用户 2026-10-14「隐藏 USAGE、横向空间给打印机」）
     // 没有打印机数据时这一格不画，DSH 面板按需自己撑开（此处保持原宽，视觉更整齐）
+    // ★ 看板娘不占这格（2026-11-02 用户改需求）：她改画在「用量」面板右上空区
+    //   （见 usagePanel），打印机格维持原行为 —— 有数据画卡、没数据空着。
     const pr: PrinterInfo | undefined = t.printer;
     if (!cellMode && !dotiiInPrinter && pr !== undefined) {
       Dashboard.printerPanel(ctx, L.prXWide, L.prY, L.prW, L.prH, pr);
@@ -1656,6 +1659,13 @@ export class Dashboard {
                             ex: RenderExtras | null = null): void {
     Dashboard.panel(ctx, x, y, w, h, C.cyan, '用量');
 
+    // ★ 看板娘（2026-11-02，用户改需求："在用量那一格子找地方放，可以不搞那么大的"）：
+    //   右上空区（标题胶囊下方、余额横线上方、TOKEN 数字右侧）画半身小女仆
+    //   （头 + 肩 + 捧托盘 + 热气 + 星星，动画与整格版同源）。
+    //   TOKEN 数字的 fitText 宽度按 maidW 收窄 —— 长数字截断而不是压到她。
+    const maidW = 118;
+    ThemeMaid.renderSmall(ctx, x + w - 22 - maidW, y + 56, maidW, 132, Date.now());
+
     const tk: TokenInfo = t.tokens ?? {};
     const todayTotal = tk.todayTotal ?? 0;
     const bal: BalanceInfo | undefined = t.balance;
@@ -1663,7 +1673,7 @@ export class Dashboard {
     // ---- 今日 TOKEN：数字改到标签下面（用户要求）且缩到 2.0× ----
     Dashboard.label(ctx, '今日 TOKEN', x + 22, y + 86, 16, C.textS, 'left');
     Dashboard.mono(ctx, Dashboard.fitText(ctx, Dashboard.fmtTokens(todayTotal),
-      F.monoSub(30, 'bold'), w - 44), x + 22, y + 152, 30, C.textW, 'left', 'bold', 'sub');
+      F.monoSub(30, 'bold'), w - 44 - maidW - 8), x + 22, y + 152, 30, C.textW, 'left', 'bold', 'sub');
 
     // ---- 余额 ----
     Dashboard.hlineLocal(ctx, x + 22, x + w - 22, y + 196);

@@ -701,3 +701,51 @@ HAP 构建走的是另一条路：`/data/service/hnp/hmos-clt.org/hmos-clt_1.0.0
   MiniHttp `_requests++` 非原子（:171）。
 - **本机限制备忘**：`tools/cli_build.sh` 因 hvigorw shebang（`bad interpreter: Operation not permitted`）
   在本机不可用，构建验证一律走 `devecocli build`。
+
+## 2026-11-02 看板娘（Q版蓝发女仆）进用量面板
+
+用户需求：主题 0 用量格子里放一个**会动的** Q版蓝发小女孩女仆（黑白女仆装+荷叶边头饰、
+大眼睛圆脸、双手捧小托盘、日系插画风、柔和光影）。用户明确：**放在用量那一格里找地方、
+可以小一点**，不要占用 Dotii/打印机格。
+
+### 落地形态（v3 二轮优化：头发飘逸 + 更 Q，2026-11-02 下午）
+- `ThemeMaid.renderSmall(ctx,x,y,w,h,nowMs)`：半身小版（头+肩+捧托盘+热气+星星），
+  canonical 半身区沿用整格版坐标（274 宽画布 cx=137）：宽 发梢最远 cx±83=166、
+  高 呆毛顶(约 30，含呼吸/弹跳余量) 到托盘底(284)=258，`k=min(w/166,h/258)` 等比、
+  底边对齐区域底、水平居中、rect 裁剪封边。
+  动画与整格版 `render()` 同源（bob/backHair/body/head×1.35+scaleHead/sparkles/淡粉光晕），
+  `render()` 保留未接线。
+- 二轮改动（用户反馈"头发不够飘逸、不够 Q"）：
+  - `scaleHead()`：头部以脖颈 (cx,198) 为锚整体放大 **1.15**（下巴不动、头往上/两侧长大、
+    脖子视觉变短）→ 头身比 ~1:1.5；眼睛放大（白眼球 12.5×14.5、瞳孔 5.2、睫毛 5px）、
+    腮红加大加圆、刘海齿隙外移避开大眼、**呆毛×2**（主毛随风甩+副毛小卷）。
+  - 头发风场：`wind()` 微风主相位 ~2.6s 全头同向 + `ripple()` 每束涟漪 ~1.75s 两侧异相；
+    后发每侧重画为两束波状长裙发（外深内亮分层、发梢尖收），发梢摆幅>中段且相位滞后
+    → 波从发根传到发梢的甩尾感；侧发同场驱动。`backHair/head` 签名改传 nowMs（不再传 sway）。
+  - 星星移位避开加宽后的头发（(cx+86,110)/(cx-82,172)）。
+- `Dashboard.usagePanel`（~:1667）：`Dashboard.panel(...)` 后画她——
+  `ThemeMaid.renderSmall(ctx, x+w-22-118, y+56, 118, 132, Date.now())`；
+  TOKEN 数字 fitText 宽度收窄为 `w-44-118-8`（长数字截断而不是压到她）。
+- `LcdService.maidShown()`（~:2026）单一真源门控：
+  `theme===0 && !verticalMode && L.usPanelVisible`（新增 `import { L } from '../common/Theme'`），
+  签名 `maid=${maidShown() ? ThemeMaid.animTick(Date.now()) : -1}`，
+  `syncPongInterval()` 无参签名（调用点同步改），maidOn 分支 MAID_FPS_MS=220。
+  → 标准/v4/v6 三档横装全生效（v6=默认，无需切档）。
+
+### 真机验证数字（MatePad，v6 档，2026-11-02 12:06）
+- 女仆区 (866..984, 70..202)：白围裙 15.0%、蓝发 18.1%（主色 #4E7CE4 系）、肤色 4.1%（#FFE3CB 系）。
+- 核心区 (884..966, 74..198)：白 21.8%/蓝 27.7%/肤色 6.3%；两帧差 **11.7% = 动画在动**。
+- TOKEN 数字 (728..838,138..180)：93.6% 干净深底+4.8% 白字，与女仆零重叠，数字静止（diff 0.0%）。
+
+### 本轮踩过的坑（别重犯）
+1. **/frame.jpg 是 180° 旋转的**（rotateNow()=true，渲染前画布变换 :3099）。分析帧一律先
+   `PIL rotate(180)` 再按逻辑坐标探测。**判方向别用"绿簇测向"**：DSH 走势线绿 (48,192,144)
+   会落进 v6 VM 测试窗 (1016..1440) 造成假阳性——用**马里奥天空蓝大块**（翻转后 VM 位置）
+   + 砖块橙带 + 走势线绿 + 女仆肤色簇四点交叉验证才可靠。
+2. `t.printer === undefined` 永远为假：直连探活 3 次失败后 `onPrinterFail`（~:1576-1598）
+   会把 OFFLINE PrinterInfo 贴回遥测（`d.printer = this.directPrinter`）。判断打印机离线要用
+   `pr.state==='OFFLINE' || pr.online===false`（v1 教训，v2 已不再依赖此条件）。
+3. 部署重启会把 printerCell 重置回 'v6'（LcdService 字段默认 + Index.ets:667 守卫
+   `svc.printerCell==='printer'` 启动时恒 false → 偏好永不回放）。v2 女仆在用量面板内，v6 默认档即可见，不受影响。
+4. 抓帧流程：`hdc -t 127.0.0.1:40601 fport tcp:45646 tcp:54546`（重启后要重挂）→
+   `curl 127.0.0.1:45646/frame.jpg`；分析脚本见 `/data/storage/el2/base/temp/deveco/verify_maid2.py`。

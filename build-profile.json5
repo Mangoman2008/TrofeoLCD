@@ -4,10 +4,10 @@
       {
         "name": "default",
         "material": {
-          "storePassword": "000000205ABF79881ABEA568A5BB85B40762EC708238AC9A2595FAEA5E93A634233ED646BF3EBCCCD5C764D934F9B046",
+          "storePassword": "000000208C415BE60E9A8704DE73C7067214DC7FFAEEB47165A3D894B7EA3B3886786B5B11887D1EF67C14D0E80E779D",
           "certpath": "/storage/Users/currentUser/.ohos/config/default_TrofeoLCDKZ85lRDAN4kJB9t2Gf_pSwcuvwvd_VpyHZm2K6oHmUY.cer",
           "keyAlias": "debugKey",
-          "keyPassword": "000000205ABF79881ABEA568A5BB85B40762EC708238AC9A2595FAEA5E93A634233ED646BF3EBCCCD5C764D934F9B046",
+          "keyPassword": "000000208C415BE60E9A8704DE73C7067214DC7FFAEEB47165A3D894B7EA3B3886786B5B11887D1EF67C14D0E80E779D",
           "profile": "/storage/Users/currentUser/.ohos/config/default_TrofeoLCDKZ85lRDAN4kJB9t2Gf_pSwcuvwvd_VpyHZm2K6oHmUY.p7b",
           "signAlg": "SHA256withECDSA",
           "storeFile": "/storage/Users/currentUser/.ohos/config/default_TrofeoLCDKZ85lRDAN4kJB9t2Gf_pSwcuvwvd_VpyHZm2K6oHmUY.p12"
